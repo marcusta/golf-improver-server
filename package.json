@@ -1,0 +1,56 @@
+{
+  "name": "golf-improver-server",
+  "type": "module",
+  "private": true,
+  "module": "src/server.ts",
+  "scripts": {
+    "// DEVELOPMENT //": "",
+    "dev": "bun --watch src/server.ts",
+    "start": "bun src/server.ts",
+    "// BUILD //": "",
+    "build": "bun build src/index.ts --outdir=dist --target=bun",
+    "build:clean": "rm -rf dist && bun run build",
+    "// DATABASE (DRIZZLE) //": "",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "bun src/db/migrate.ts",
+    "db:studio": "drizzle-kit studio",
+    "db:seed": "bun src/db/seed.ts",
+    "// QUALITY & TESTING //": "",
+    "lint": "eslint . --ext .ts,.js,.tsx,.jsx",
+    "lint:fix": "eslint . --ext .ts,.js,.tsx,.jsx --fix",
+    "format": "prettier --write .",
+    "type-check": "tsc --noEmit",
+    "test": "bun test",
+    "test:watch": "bun test --watch",
+    "test:coverage": "bun test --coverage ./src/**/*.test.ts",
+    "check-all": "bun run type-check && bun run lint && bun run test"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.2.16",
+    "@typescript-eslint/eslint-plugin": "^8.35.0",
+    "@typescript-eslint/parser": "^8.35.0",
+    "@typescript-eslint/typescript-estree": "^8.35.0",
+    "drizzle-kit": "^0.31.1",
+    "eslint": "^9.29.0",
+    "eslint-config-prettier": "^10.1.5",
+    "eslint-plugin-prettier": "^5.5.1",
+    "prettier": "^3.6.2"
+  },
+  "peerDependencies": {
+    "typescript": "^5.8.3"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.13.1",
+    "@orpc/client": "^1.5.2",
+    "@orpc/server": "^1.5.2",
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.3",
+    "cors": "^2.8.5",
+    "dotenv": "^16.5.0",
+    "drizzle-orm": "^0.44.2",
+    "express": "^5.1.0",
+    "hono": "^4.8.0",
+    "zod": "^3.25.67",
+    "zod-to-json-schema": "^3.24.5"
+  }
+}
