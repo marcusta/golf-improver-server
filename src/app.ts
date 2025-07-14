@@ -22,7 +22,16 @@ export function createHonoApp(database: Database) {
 
   // --- Global Error Handling ---
   app.onError((err, c) => {
-    console.error(`[CRITICAL_HONO_ERROR] at ${c.req.path}:`, err);
+    const timestamp = new Date().toISOString();
+    const errorInfo = {
+      timestamp,
+      path: c.req.path,
+      method: c.req.method,
+      userAgent: c.req.header("User-Agent"),
+      error: err.message,
+      stack: err.stack
+    };
+    console.error(`[${timestamp}] [ERROR] CRITICAL_HONO_ERROR:`, JSON.stringify(errorInfo, null, 2));
     return c.json({ error: "Internal Server Error" }, 500);
   });
 
@@ -63,7 +72,16 @@ export function createHonoApp(database: Database) {
       }
       return await next();
     } catch (error) {
-      console.error("[Hono RPC Handler Error]:", error);
+      const timestamp = new Date().toISOString();
+      const errorInfo = {
+        timestamp,
+        path: c.req.path,
+        method: c.req.method,
+        userAgent: c.req.header("User-Agent"),
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined
+      };
+      console.error(`[${timestamp}] [ERROR] RPC_HANDLER_ERROR:`, JSON.stringify(errorInfo, null, 2));
       return c.json({ error: "Internal Server Error" }, 500);
     }
   });
