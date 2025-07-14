@@ -26,6 +26,13 @@ import { CreateTestTemplateSchema } from "./schemas/tests";
 function createProcedures(services: Services) {
   return {
     // ========================================
+    // Health Check procedures
+    // ========================================
+    ping: os.handler(async () => {
+      return "pong";
+    }),
+
+    // ========================================
     // Authentication procedures
     // ========================================
     auth: {

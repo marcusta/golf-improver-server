@@ -363,7 +363,7 @@ export function createDebugMiddleware(): MiddlewareFunction {
  */
 export const skipAuthFilter: FilterFunction = (procedurePath) => {
   const cleanPath = procedurePath.replace(".~orpc", "");
-  const shouldSkip = ["auth.login", "auth.register", "tests.list", "tests.create"].includes(cleanPath);
+  const shouldSkip = ["ping", "auth.login", "auth.register", "tests.list", "tests.create"].includes(cleanPath);
   return !shouldSkip;
 };
 

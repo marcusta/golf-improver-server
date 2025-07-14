@@ -10,6 +10,7 @@
     "// BUILD //": "",
     "build": "bun build src/index.ts --outdir=dist --target=bun",
     "build:clean": "rm -rf dist && bun run build",
+    "mcp:http": "bun src/mcp/advanced-mcp-server-http.ts",
     "// DATABASE (DRIZZLE) //": "",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "bun src/db/migrate.ts",
