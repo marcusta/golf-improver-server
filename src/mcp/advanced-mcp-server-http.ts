@@ -15,7 +15,7 @@ import { existsSync, readFileSync } from "fs";
 import { join } from "path";
 import { createHonoApp } from "../app.js";
 import { SimpleAPIExtractor } from "./dynamic-api-extractor.js";
-import { createDefaultWatcher, APIFileWatcher } from "./file-watcher.js";
+import { APIFileWatcher, createDefaultWatcher } from "./file-watcher.js";
 
 // MCP types
 interface MCPRequest {
@@ -133,7 +133,19 @@ class APIDatabase {
       `);
 
       const searchTerm = `%${query}%`;
-      return fallbackQuery.all(searchTerm, searchTerm, searchTerm, limit);
+      console.log(
+        `[DEBUG] Executing LIKE query with search term: "${searchTerm}"`
+      );
+      const fallbackResults = fallbackQuery.all(
+        searchTerm,
+        searchTerm,
+        searchTerm,
+        limit
+      );
+      console.log(
+        `[DEBUG] LIKE query returned ${fallbackResults.length} results`
+      );
+      return fallbackResults;
     } catch (error) {
       console.error("Search error:", error);
       // Final fallback to LIKE search if FTS fails for some reason
@@ -266,10 +278,10 @@ CREATE VIRTUAL TABLE api_search USING fts5(
 -- e.g., query: "user authentication"
 
 -- For advanced SQL searches, use the 'sql' searchType. You can query the FTS table directly for powerful searches.
--- Find APIs related to both 'workspace' and 'actor':
+-- Find APIs related to both 'rounds' and 'tests':
 --   SELECT name, description FROM api_endpoints
 --   JOIN api_search ON api_endpoints.id = api_search.rowid
---   WHERE api_search MATCH 'workspace AND actor';
+--   WHERE api_search MATCH 'rounds AND tests';
 --
 -- Find APIs related to 'user' but not 'delete':
 --   SELECT name, description FROM api_endpoints
@@ -280,12 +292,12 @@ CREATE VIRTUAL TABLE api_search USING fts5(
 -- Find all authentication endpoints:
 --   SELECT * FROM api_endpoints WHERE category = 'Authentication';
 -- 
--- Search for workspace-related APIs:
---   SELECT * FROM api_endpoints WHERE name LIKE '%workspace%';
+-- Search for rounds-related APIs:
+--   SELECT * FROM api_endpoints WHERE name LIKE '%rounds%';
 --
 -- Get input parameters for an API:
 --   SELECT * FROM api_parameters WHERE endpoint_id = (
---     SELECT id FROM api_endpoints WHERE name = 'workspaces.create'
+--     SELECT id FROM api_endpoints WHERE name = 'rounds.create'
 --   ) AND parameter_type = 'input';
 `;
   }
@@ -327,9 +339,9 @@ class APIExecutor {
       // Map domain to service name
       const serviceMapping: Record<string, string> = {
         auth: "auth",
-        rounds: "rounds", 
+        rounds: "rounds",
         tests: "testTemplates",
-        user: "user"
+        user: "user",
       };
 
       const serviceName = serviceMapping[domain];
@@ -348,7 +360,7 @@ class APIExecutor {
         // For authenticated calls, we need to decode the token to get user ID
         // For now, we'll use a mock user ID - in real implementation, decode JWT
         const mockUserId = "mcp-user";
-        
+
         // Different services have different method signatures
         if (domain === "auth") {
           result = await service[method](input);
@@ -408,12 +420,18 @@ async function initializeAPI(): Promise<void> {
   // Extract comprehensive API metadata to database using dynamic extractor
   console.log("[Advanced MCP Server] Extracting comprehensive API metadata...");
   const apiFilePath = join(process.cwd(), "src/api/api.ts");
-  const extractor = new SimpleAPIExtractor(API_DB_PATH, apiFilePath, process.cwd());
+  const extractor = new SimpleAPIExtractor(
+    API_DB_PATH,
+    apiFilePath,
+    process.cwd()
+  );
   await extractor.extractFromAPI();
   extractor.close();
 
   // Setup file watcher for automatic updates
-  console.log("[Advanced MCP Server] Setting up file watcher for automatic updates...");
+  console.log(
+    "[Advanced MCP Server] Setting up file watcher for automatic updates..."
+  );
   globalFileWatcher = createDefaultWatcher(API_DB_PATH, () => globalHonoApp);
   globalFileWatcher.start();
 

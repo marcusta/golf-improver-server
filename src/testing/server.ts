@@ -1,8 +1,6 @@
-import type { Server } from "bun";
+import { serve, type Server } from "bun";
 import { Database } from "bun:sqlite";
-import { Hono } from "hono";
-import { cors } from "hono/cors";
-import { createApp } from "../api/orpc-api";
+import { createHonoApp } from "../app";
 import { createTestDatabase as createMigratedTestDatabase } from "../db/migrate";
 import { createServices, type Services } from "../services";
 
@@ -34,35 +32,10 @@ export function createTestServices(database: Database): Services {
  * @returns Promise that resolves to the port number
  */
 export async function setupTestServer(db: Database): Promise<number> {
-  const services = createServices(db);
-  const { rpcHandler, router } = createApp(services);
-
-  const app = new Hono();
-  app.use("/rpc/*", cors());
-
-  // Add the RPC handler
-  app.use("/rpc/*", async (c, next) => {
-    const { matched, response } = await rpcHandler.handle(c.req.raw, {
-      prefix: "/rpc",
-    });
-
-    if (matched) {
-      return c.newResponse(response.body, response);
-    }
-
-    await next();
-    return; // Ensure a return value
-  });
-
-  app.get("/", (c) => {
-    return c.json({
-      message: "Test server is running. oRPC endpoint available at /rpc",
-      procedures: Object.keys(router),
-    });
-  });
+  const { app } = createHonoApp(db);
 
   // Start server on a random port
-  const server = Bun.serve({
+  const server = serve({
     fetch: app.fetch,
     port: 0, // Let Bun assign a random port
   });

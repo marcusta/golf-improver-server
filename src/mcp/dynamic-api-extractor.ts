@@ -1022,19 +1022,76 @@ export class DynamicAPIExtractor {
     console.log(`[Dynamic API Extractor] Inserted endpoint: ${endpoint.name}`);
   }
 
+  private getZodTypeName(zodDef: any): string {
+    if (!zodDef || !zodDef._def || !zodDef._def.typeName) return "any";
+    const typeName = zodDef._def.typeName;
+    switch (typeName) {
+      case "ZodString":
+        return "string";
+      case "ZodNumber":
+        return "number";
+      case "ZodBoolean":
+        return "boolean";
+      case "ZodDate":
+        return "date";
+      case "ZodObject":
+        return "object";
+      case "ZodArray":
+        return "array";
+      default:
+        return typeName.replace("Zod", "").toLowerCase();
+    }
+  }
+
   private async insertParametersFromSchemaInfo(
     endpointId: number,
     parameterType: "input" | "output",
     schemaInfo: SchemaInfo
   ): Promise<void> {
-    // For now, insert a placeholder - could be enhanced to load and parse actual Zod schemas
+    try {
+      const schemaModule = await import(schemaInfo.filePath);
+      const zodSchema = schemaModule[schemaInfo.name];
+
+      if (zodSchema && zodSchema.shape) {
+        const shape = zodSchema.shape;
+        const insertParam = this.db.prepare(`
+          INSERT INTO api_parameters (
+            endpoint_id, parameter_name, parameter_type, data_type,
+            is_required, is_optional, description, source_schema_name
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `);
+
+        const transaction = this.db.transaction(() => {
+          for (const paramName in shape) {
+            const paramDef = shape[paramName];
+            insertParam.run(
+              endpointId,
+              paramName,
+              parameterType,
+              this.getZodTypeName(paramDef),
+              !paramDef.isOptional(),
+              paramDef.isOptional(),
+              paramDef.description || "",
+              schemaInfo.name
+            );
+          }
+        });
+        transaction();
+        return;
+      }
+    } catch (e) {
+      console.error(
+        `[Dynamic API Extractor] Could not dynamically import or parse schema ${schemaInfo.name} from ${schemaInfo.filePath}`,
+        e
+      );
+    }
+
     const insertParam = this.db.prepare(`
       INSERT INTO api_parameters (
         endpoint_id, parameter_name, parameter_type, data_type,
         is_required, is_optional, description, source_schema_name
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `);
-
     insertParam.run(
       endpointId,
       "schema_defined",

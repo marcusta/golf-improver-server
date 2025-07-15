@@ -40,7 +40,7 @@ describe("Putting Test Suite API", () => {
       headers["Authorization"] = `Bearer ${token}`;
     }
 
-    const body = JSON.stringify({ json: payload, meta: [] });
+    const body = JSON.stringify(payload);
     return await app.request(path, { method, headers, body });
   }
 
@@ -54,7 +54,7 @@ describe("Putting Test Suite API", () => {
       });
 
       expect(response.status).toBe(200);
-      const { json: data } = (await response.json()) as { json: any };
+      const data = await response.json();
       expect(data.token).toBeDefined();
       expect(data.user.email).toBe("newuser@example.com");
       expect(data.user.firstName).toBe("New");
@@ -68,7 +68,7 @@ describe("Putting Test Suite API", () => {
       });
 
       expect(response.status).toBe(200);
-      const { json: data } = (await response.json()) as { json: any };
+      const data = await response.json();
       expect(data.token).toBeDefined();
       expect(data.user.email).toBe("test@example.com");
       expect(data.user.lastLoginAt).toBeDefined();
@@ -89,7 +89,7 @@ describe("Putting Test Suite API", () => {
       const response = await makeRequest("/rpc/tests/list", {});
 
       expect(response.status).toBe(200);
-      const { json: data } = (await response.json()) as { json: any };
+      const data = await response.json();
       expect(data.tests).toBeDefined();
       expect(data.tests.length).toBeGreaterThan(0);
       expect(data.tests[0]).toHaveProperty("testId");
@@ -109,7 +109,7 @@ describe("Putting Test Suite API", () => {
       const response = await makeRequest("/rpc/tests/create", testTemplate);
 
       expect(response.status).toBe(200);
-      const { json: data } = (await response.json()) as { json: any };
+      const data = await response.json();
       expect(data.testId).toBe("custom-test-3");
       expect(data.name).toBe("Custom 3-Hole Test");
       expect(data.description).toBe("A quick 3-hole test for beginners");
@@ -197,7 +197,7 @@ describe("Putting Test Suite API", () => {
         email: "test@example.com",
         password: "Password123!",
       });
-      const { json: loginData } = (await loginResponse.json()) as { json: any };
+      const loginData = await loginResponse.json();
       authToken = loginData.token;
     });
 
@@ -221,7 +221,7 @@ describe("Putting Test Suite API", () => {
       );
 
       expect(response.status).toBe(200);
-      const { json: data } = (await response.json()) as { json: any };
+      const data = await response.json();
       expect(data.roundId).toBeDefined();
       expect(data.testId).toBe("putting-9");
       expect(data.totalPutts).toBe(6);
@@ -236,7 +236,7 @@ describe("Putting Test Suite API", () => {
       );
 
       expect(response.status).toBe(200);
-      const { json: data } = (await response.json()) as { json: any };
+      const data = await response.json();
       expect(data.rounds).toBeDefined();
       expect(data.pagination).toBeDefined();
       expect(data.pagination.total).toBeGreaterThanOrEqual(0);
@@ -253,7 +253,7 @@ describe("Putting Test Suite API", () => {
       );
 
       expect(response.status).toBe(200);
-      const { json: data } = (await response.json()) as { json: any };
+      const data = await response.json();
       expect(data.roundId).toBe(roundId);
       expect(data.holes).toBeDefined();
       expect(Array.isArray(data.holes)).toBe(true);
@@ -277,7 +277,7 @@ describe("Putting Test Suite API", () => {
         email: "test@example.com",
         password: "Password123!",
       });
-      const { json: loginData } = (await loginResponse.json()) as { json: any };
+      const loginData = await loginResponse.json();
       authToken = loginData.token;
     });
 
@@ -290,7 +290,7 @@ describe("Putting Test Suite API", () => {
       );
 
       expect(response.status).toBe(200);
-      const { json: data } = (await response.json()) as { json: any };
+      const data = await response.json();
       expect(data.user).toBeDefined();
       expect(data.user.email).toBe("test@example.com");
       expect(data.stats).toBeDefined();
