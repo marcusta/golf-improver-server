@@ -13,7 +13,7 @@ import "dotenv/config";
 import express, { NextFunction, Request, Response } from "express";
 import { existsSync, readFileSync } from "fs";
 import { join } from "path";
-import { createApp } from "../api/orpc-api.js";
+import { createHonoApp } from "../app.js";
 import { SimpleAPIExtractor } from "./dynamic-api-extractor.js";
 import { createDefaultWatcher, APIFileWatcher } from "./file-watcher.js";
 
@@ -42,7 +42,7 @@ const API_DB_PATH = join(process.cwd(), "api-metadata.db");
 // Global instances
 let globalAPIDB: APIDatabase | null = null;
 let globalAPIExecutor: APIExecutor | null = null;
-let globalRouter: any = null;
+let globalHonoApp: any = null;
 let globalFileWatcher: APIFileWatcher | null = null;
 
 // Server-side session state for authenticated agent access
@@ -296,17 +296,19 @@ CREATE VIRTUAL TABLE api_search USING fts5(
 }
 
 /**
- * API Executor - Handles direct oRPC calls
+ * API Executor - Handles direct HTTP calls to Hono routes
  */
 class APIExecutor {
-  private router: any;
+  // private _honoApp: any; // Reserved for future direct HTTP call execution
+  private services: any;
 
-  constructor(router: any) {
-    this.router = router;
+  constructor(_honoApp: any, services: any) {
+    // this._honoApp = _honoApp; // Reserved for future use
+    this.services = services;
   }
 
   /**
-   * Execute an API call directly through oRPC
+   * Execute an API call directly through service layer
    */
   async executeAPI(
     apiName: string,
@@ -321,23 +323,46 @@ class APIExecutor {
       );
     }
 
-    if (!this.router[domain] || !this.router[domain][method]) {
-      throw new Error(`API not found: ${apiName}`);
-    }
-
-    // Create context for the call
-    const context = authToken ? { user: { id: "mcp-user" } } : {};
-
     try {
-      // Get the handler from the router
-      const handler = this.router[domain][method]["~orpc"].handler;
+      // Map domain to service name
+      const serviceMapping: Record<string, string> = {
+        auth: "auth",
+        rounds: "rounds", 
+        tests: "testTemplates",
+        user: "user"
+      };
 
-      if (!handler) {
-        throw new Error(`Handler not found for ${apiName}`);
+      const serviceName = serviceMapping[domain];
+      if (!serviceName || !this.services[serviceName]) {
+        throw new Error(`Service not found for domain: ${domain}`);
       }
 
-      // Execute the handler
-      const result = await handler({ input, context });
+      const service = this.services[serviceName];
+      if (!service[method] || typeof service[method] !== "function") {
+        throw new Error(`Method not found: ${domain}.${method}`);
+      }
+
+      // Create user context for authenticated calls
+      let result;
+      if (authToken) {
+        // For authenticated calls, we need to decode the token to get user ID
+        // For now, we'll use a mock user ID - in real implementation, decode JWT
+        const mockUserId = "mcp-user";
+        
+        // Different services have different method signatures
+        if (domain === "auth") {
+          result = await service[method](input);
+        } else if (domain === "rounds") {
+          result = await service[method](input, mockUserId);
+        } else if (domain === "user") {
+          result = await service[method](mockUserId);
+        } else {
+          result = await service[method](input);
+        }
+      } else {
+        // For public calls
+        result = await service[method](input);
+      }
 
       return {
         success: true,
@@ -371,31 +396,31 @@ async function initializeAPI(): Promise<void> {
   const database = new Database(dbFileName);
   console.log(`[Advanced MCP Server] Connected to database: ${dbFileName}`);
 
-  // Create services and oRPC router
+  // Create services and Hono app
   const services = createServices(database);
-  const { router } = createApp(services);
-  globalRouter = router;
+  const { app } = createHonoApp(database);
+  globalHonoApp = app;
 
   // Initialize API database and executor
   globalAPIDB = new APIDatabase(API_DB_PATH);
-  globalAPIExecutor = new APIExecutor(globalRouter);
+  globalAPIExecutor = new APIExecutor(globalHonoApp, services);
 
   // Extract comprehensive API metadata to database using dynamic extractor
   console.log("[Advanced MCP Server] Extracting comprehensive API metadata...");
-  const apiFilePath = join(process.cwd(), "src/api/orpc-api.ts");
+  const apiFilePath = join(process.cwd(), "src/api/api.ts");
   const extractor = new SimpleAPIExtractor(API_DB_PATH, apiFilePath, process.cwd());
   await extractor.extractFromAPI();
   extractor.close();
 
   // Setup file watcher for automatic updates
   console.log("[Advanced MCP Server] Setting up file watcher for automatic updates...");
-  globalFileWatcher = createDefaultWatcher(API_DB_PATH, () => globalRouter);
+  globalFileWatcher = createDefaultWatcher(API_DB_PATH, () => globalHonoApp);
   globalFileWatcher.start();
 
   console.log("[Advanced MCP Server] API metadata extracted to database");
   console.log(
-    "[Advanced MCP Server] Router structure:",
-    Object.keys(globalRouter)
+    "[Advanced MCP Server] Services available:",
+    Object.keys(services)
   );
 }
 
@@ -838,7 +863,7 @@ async function main() {
     app.use(express.json({ limit: "10mb" }));
 
     // Add request logging
-    app.use((req: Request, res: Response, next: NextFunction) => {
+    app.use((req: Request, _res: Response, next: NextFunction) => {
       console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
       next();
     });
@@ -861,7 +886,7 @@ async function main() {
     });
 
     // Health check endpoint
-    app.get("/health", (req: Request, res: Response) => {
+    app.get("/health", (_req: Request, res: Response) => {
       res.json({
         status: "healthy",
         timestamp: new Date().toISOString(),
@@ -878,7 +903,7 @@ async function main() {
     });
 
     // Tools list endpoint for debugging
-    app.get("/mcp/tools", (req: Request, res: Response) => {
+    app.get("/mcp/tools", (_req: Request, res: Response) => {
       res.json({
         tools: [
           "c4_searchAPI - Search APIs by functionality or SQL query",
@@ -890,7 +915,7 @@ async function main() {
     });
 
     // Database info endpoint
-    app.get("/mcp/database", (req: Request, res: Response) => {
+    app.get("/mcp/database", (_req: Request, res: Response) => {
       if (!globalAPIDB) {
         res.status(500).json({ error: "Database not initialized" });
         return;

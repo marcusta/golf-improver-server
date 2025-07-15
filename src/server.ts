@@ -1,6 +1,7 @@
 import { serve } from "bun";
 import { Database } from "bun:sqlite";
 import "dotenv/config";
+import { showRoutes } from "hono/dev";
 import { createHonoApp } from "./app";
 import { createServices } from "./services";
 
@@ -11,7 +12,7 @@ const logLevel = process.env.LOG_LEVEL || (isProduction ? "info" : "debug");
 function log(level: string, message: string, ...args: any[]) {
   const timestamp = new Date().toISOString();
   const logMessage = `[${timestamp}] [${level.toUpperCase()}] ${message}`;
-  
+
   if (level === "error") {
     console.error(logMessage, ...args);
   } else {
@@ -20,13 +21,13 @@ function log(level: string, message: string, ...args: any[]) {
 }
 
 // Global error handlers
-process.on('uncaughtException', (error) => {
-  log('error', 'Uncaught Exception:', error);
+process.on("uncaughtException", (error) => {
+  log("error", "Uncaught Exception:", error);
   process.exit(1);
 });
 
-process.on('unhandledRejection', (reason, promise) => {
-  log('error', 'Unhandled Rejection at:', promise, 'reason:', reason);
+process.on("unhandledRejection", (reason, promise) => {
+  log("error", "Unhandled Rejection at:", promise, "reason:", reason);
   process.exit(1);
 });
 
@@ -38,7 +39,7 @@ if (!dbFileName) {
 }
 
 log("info", "Starting Golf Improver Server");
-log("info", `Environment: ${process.env.NODE_ENV || 'development'}`);
+log("info", `Environment: ${process.env.NODE_ENV || "development"}`);
 log("info", `Log Level: ${logLevel}`);
 
 const database = new Database(dbFileName);
@@ -51,11 +52,12 @@ await services.seed.seedDatabase();
 log("info", "Database seeding completed");
 
 // Create the Hono app with all middleware configured
-const { app, router } = createHonoApp(database);
-log("debug", `Available procedures: ${Object.keys(router).join(", ")}`);
+const { app } = createHonoApp(database);
+// log("debug", `Available procedures: ${Object.keys(app).join(", ")}`);
+showRoutes(app);
 
 // --- Start Server ---
-const port = process.env.PORT ? parseInt(process.env.PORT) : 3100;
+const port = process.env["PORT"] ? parseInt(process.env["PORT"]) : 3100;
 log("info", `🚀 Server starting on port ${port}`);
 log("info", `📡 oRPC endpoint available at /rpc`);
 
@@ -63,9 +65,3 @@ serve({
   fetch: app.fetch,
   port,
 });
-
-// Export the type for client-side type safety (note: this would need the router type from createApp)
-// export type App = typeof router;
-
-export const rpcRouter = router;
-export type App = typeof router;

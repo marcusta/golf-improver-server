@@ -1,96 +1,53 @@
 import { Database } from "bun:sqlite";
-import { Hono, type Context } from "hono";
+import { Hono } from "hono";
 import { cors } from "hono/cors";
-import { verify } from "hono/jwt";
-import { createApp } from "./api/orpc-api";
+import { HTTPException } from "hono/http-exception";
+import { createApiRoutes } from "./api/api";
+import { createLoggingMiddleware } from "./api/hono-middlewares";
 import { createServices } from "./services";
+import { UnauthorizedError } from "./services/errors"; // Assuming you have custom errors
 
 /**
- * Creates a Hono application instance with minimal middleware
- * Only handles JWT parsing and passes context to oRPC
- * @param database - Database instance to inject into services
- * @returns Configured Hono app instance
+ * Creates the main Hono application.
+ * @param database - Database instance to inject into services.
+ * @returns The configured Hono app instance.
  */
 export function createHonoApp(database: Database) {
   // 1. Create dependencies
   const services = createServices(database);
 
-  // 2. Create oRPC app with all middleware built-in
-  const { rpcHandler, router } = createApp(services);
-
+  // 2. Create Hono app
   const app = new Hono();
+
+  // 3. Apply global middleware
+  app.use("*", cors());
+  app.use("*", createLoggingMiddleware(500)); // Log all requests and performance
+
+  // 4. Mount API routes
+  const apiRoutes = createApiRoutes(services);
+  app.route("/rpc", apiRoutes);
 
   // --- Global Error Handling ---
   app.onError((err, c) => {
-    const timestamp = new Date().toISOString();
-    const errorInfo = {
-      timestamp,
-      path: c.req.path,
-      method: c.req.method,
-      userAgent: c.req.header("User-Agent"),
-      error: err.message,
-      stack: err.stack
-    };
-    console.error(`[${timestamp}] [ERROR] CRITICAL_HONO_ERROR:`, JSON.stringify(errorInfo, null, 2));
+    console.error(`[API Error] Path: ${c.req.path}`, err);
+
+    if (err instanceof HTTPException) {
+      return err.getResponse();
+    }
+    // Handle custom service errors
+    if (err instanceof UnauthorizedError) {
+      return c.json({ error: err.message }, 401);
+    }
+    // Add more custom error checks here (e.g., NotFoundError -> 404)
+
+    // Fallback for unexpected errors
     return c.json({ error: "Internal Server Error" }, 500);
-  });
-
-  // --- CORS ---
-  app.use("/rpc/*", cors());
-
-  // --- Minimal JWT Parsing & oRPC Handler ---
-  app.use("/rpc/*", async (c: Context, next) => {
-    const url = new URL(c.req.url);
-    const action = url.pathname.replace("/rpc/", "");
-    let context: any = {};
-
-    // Only parse JWT, don't validate - let oRPC middleware handle validation
-    if (action !== "auth/login" && action !== "auth/register") {
-      const authHeader = c.req.header("Authorization");
-      const jwtSecret = process.env["JWT_SECRET"];
-
-      if (authHeader?.startsWith("Bearer ") && jwtSecret) {
-        const token = authHeader.slice(7);
-        try {
-          const payload = await verify(token, jwtSecret);
-          context = { user: { id: payload["userId"] as string } };
-        } catch (error) {
-          // Mark that token was provided but invalid
-          context = { invalidToken: true };
-        }
-      }
-      // If no Authorization header, context remains empty object (no token provided)
-    }
-
-    try {
-      const { matched, response } = await rpcHandler.handle(c.req.raw, {
-        prefix: "/rpc",
-        context,
-      });
-      if (matched) {
-        return c.newResponse(response.body, response);
-      }
-      return await next();
-    } catch (error) {
-      const timestamp = new Date().toISOString();
-      const errorInfo = {
-        timestamp,
-        path: c.req.path,
-        method: c.req.method,
-        userAgent: c.req.header("User-Agent"),
-        error: error instanceof Error ? error.message : String(error),
-        stack: error instanceof Error ? error.stack : undefined
-      };
-      console.error(`[${timestamp}] [ERROR] RPC_HANDLER_ERROR:`, JSON.stringify(errorInfo, null, 2));
-      return c.json({ error: "Internal Server Error" }, 500);
-    }
   });
 
   // --- Simple status endpoint ---
   app.get("/", (c) => {
     return c.json({
-      message: "Server is running. oRPC endpoint available at /rpc",
-      procedures: Object.keys(router),
+      message: "Server is running. API available under /rpc",
     });
   });
 
@@ -99,5 +56,5 @@ export function createHonoApp(database: Database) {
     return c.json({ status: "ok", timestamp: new Date().toISOString() });
   });
 
-  return { app, router };
+  return { app };
 }

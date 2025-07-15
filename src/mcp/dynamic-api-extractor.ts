@@ -1,11 +1,12 @@
 /**
- * Dynamic API Extractor - True metaprogramming approach
+ * Dynamic API Extractor - Hono + Zod API analysis
  *
- * Starting from orpc-api.ts, this extractor:
- * 1. Parses the API structure using TypeScript AST
+ * Starting from api.ts, this extractor:
+ * 1. Parses the Hono API structure using TypeScript AST
  * 2. Follows import chains to find Zod schemas and services
  * 3. Analyzes service methods to extract return types
  * 4. Builds a complete API database dynamically
+ * 5. Handles auth middleware detection for Bearer token auth
  */
 
 import { AST_NODE_TYPES, parse } from "@typescript-eslint/typescript-estree";
@@ -58,6 +59,19 @@ interface SourceLocation {
   filePath: string;
   lineNumber: number;
   columnNumber: number;
+}
+
+interface RouteInfo {
+  path: string;
+  method: string;
+  domain: string;
+  action: string;
+  requiresAuth: boolean;
+  schemaName?: string | undefined;
+  serviceName?: string | undefined;
+  serviceMethod?: string | undefined;
+  node: any;
+  location: SourceLocation;
 }
 
 export class DynamicAPIExtractor {
@@ -177,7 +191,7 @@ export class DynamicAPIExtractor {
   }
 
   /**
-   * Main extraction method - starts from orpc-api.ts and discovers everything
+   * Main extraction method - starts from api.ts and discovers everything
    */
   public async extractFromAPI(): Promise<void> {
     console.log("[Dynamic API Extractor] Starting dynamic API extraction...");
@@ -190,28 +204,19 @@ export class DynamicAPIExtractor {
       // Step 1: Parse the main API file
       const apiFile = await this.parseFile(this.apiFilePath);
 
-      // Step 2: Extract procedure definitions from createProcedures function
-      const procedures = this.extractProceduresFromAST(apiFile.ast);
-      console.log(
-        `[Dynamic API Extractor] Found ${Object.keys(procedures).length} domains`
-      );
+      // Step 2: Extract route definitions from createApiRoutes function
+      const routes = this.extractRoutesFromAST(apiFile.ast);
+      console.log(`[Dynamic API Extractor] Found ${routes.length} routes`);
 
       // Step 3: Discover all schemas and services referenced in the API
       await this.discoverSchemasAndServices(apiFile);
 
       // Step 4: Process each endpoint
       const endpoints: DiscoveredEndpoint[] = [];
-      for (const [domain, methods] of Object.entries(procedures)) {
-        for (const [method, procedureInfo] of Object.entries(methods as any)) {
-          const endpoint = await this.processEndpoint(
-            domain,
-            method,
-            procedureInfo,
-            apiFile
-          );
-          if (endpoint) {
-            endpoints.push(endpoint);
-          }
+      for (const route of routes) {
+        const endpoint = await this.processEndpoint(route);
+        if (endpoint) {
+          endpoints.push(endpoint);
         }
       }
 
@@ -262,65 +267,220 @@ export class DynamicAPIExtractor {
   }
 
   /**
-   * Extract procedure definitions from the createProcedures function
+   * Extract route definitions from the createApiRoutes function
    */
-  private extractProceduresFromAST(
-    ast: any
-  ): Record<string, Record<string, any>> {
-    const procedures: Record<string, Record<string, any>> = {};
+  private extractRoutesFromAST(ast: any): RouteInfo[] {
+    const routes: RouteInfo[] = [];
 
-    // Find the createProcedures function
-    const createProceduresFunction = this.findFunctionDeclaration(
+    // Find the createApiRoutes function
+    const createApiRoutesFunction = this.findFunctionDeclaration(
       ast,
-      "createProcedures"
+      "createApiRoutes"
     );
-    if (!createProceduresFunction) {
-      throw new Error("Could not find createProcedures function");
+    if (!createApiRoutesFunction) {
+      throw new Error("Could not find createApiRoutes function");
     }
 
-    // Extract the return statement object
-    const returnStatement = this.findReturnStatement(createProceduresFunction);
-    if (
-      !returnStatement ||
-      returnStatement.argument?.type !== AST_NODE_TYPES.ObjectExpression
-    ) {
-      throw new Error(
-        "Could not find procedures object in createProcedures return statement"
-      );
+    // Extract all app.post() calls from the function body
+    this.extractRouteCalls(createApiRoutesFunction.body, routes, false);
+
+    // Also look for protectedRoutes.post() calls
+    this.extractProtectedRouteCalls(createApiRoutesFunction.body, routes);
+
+    return routes;
+  }
+
+  /**
+   * Extract route calls from function body
+   */
+  private extractRouteCalls(body: any, routes: RouteInfo[], isProtected: boolean): void {
+    if (!body || !body.body) return;
+
+    for (const statement of body.body) {
+      if (statement.type === AST_NODE_TYPES.ExpressionStatement) {
+        const expr = statement.expression;
+        if (expr.type === AST_NODE_TYPES.CallExpression) {
+          // Skip protected routes when parsing regular routes
+          if (expr.callee?.type === AST_NODE_TYPES.MemberExpression &&
+              expr.callee.object?.name === "protectedRoutes") {
+            continue;
+          }
+          
+          const route = this.parseRouteCall(expr, isProtected);
+          if (route) {
+            route.location = {
+              filePath: this.apiFilePath,
+              lineNumber: statement.loc?.start.line || 0,
+              columnNumber: statement.loc?.start.column || 0,
+            };
+            routes.push(route);
+          }
+        }
+      }
     }
+  }
 
-    // Parse the object structure
-    for (const property of returnStatement.argument.properties) {
-      if (
-        property.type === AST_NODE_TYPES.Property &&
-        property.key.type === AST_NODE_TYPES.Identifier
-      ) {
-        const domain = property.key.name;
+  /**
+   * Extract protected route calls
+   */
+  private extractProtectedRouteCalls(body: any, routes: RouteInfo[]): void {
+    if (!body || !body.body) return;
 
-        if (property.value.type === AST_NODE_TYPES.ObjectExpression) {
-          procedures[domain] = {};
+    for (const statement of body.body) {
+      if (statement.type === AST_NODE_TYPES.VariableDeclaration) {
+        for (const declarator of statement.declarations) {
+          if (declarator.id?.name === "protectedRoutes" && declarator.init) {
+            // Find subsequent calls to protectedRoutes.post
+            this.findProtectedRouteCalls(body, routes);
+          }
+        }
+      }
+    }
+  }
 
-          for (const methodProperty of property.value.properties) {
-            if (
-              methodProperty.type === AST_NODE_TYPES.Property &&
-              methodProperty.key.type === AST_NODE_TYPES.Identifier
-            ) {
-              const method = methodProperty.key.name;
-              procedures[domain][method] = {
-                node: methodProperty,
-                location: {
-                  filePath: this.apiFilePath,
-                  lineNumber: methodProperty.loc?.start.line || 0,
-                  columnNumber: methodProperty.loc?.start.column || 0,
-                },
-              };
+  /**
+   * Find protectedRoutes.post calls in the function body
+   */
+  private findProtectedRouteCalls(body: any, routes: RouteInfo[]): void {
+    if (!body || !body.body) return;
+
+    for (const statement of body.body) {
+      if (statement.type === AST_NODE_TYPES.ExpressionStatement) {
+        const expr = statement.expression;
+        if (expr.type === AST_NODE_TYPES.CallExpression) {
+          const route = this.parseProtectedRouteCall(expr);
+          if (route) {
+            route.location = {
+              filePath: this.apiFilePath,
+              lineNumber: statement.loc?.start.line || 0,
+              columnNumber: statement.loc?.start.column || 0,
+            };
+            routes.push(route);
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * Parse a single route call (app.post)
+   */
+  private parseRouteCall(expr: any, isProtected: boolean): RouteInfo | null {
+    if (expr.callee?.type === AST_NODE_TYPES.MemberExpression &&
+        expr.callee.property?.name === "post" &&
+        expr.arguments.length >= 2) {
+      
+      const pathArg = expr.arguments[0];
+      if (pathArg?.type === AST_NODE_TYPES.Literal && typeof pathArg.value === "string") {
+        const path = pathArg.value;
+        const pathParts = path.split("/").filter((p: string) => p);
+        
+        if (pathParts.length >= 2) {
+          const domain = pathParts[0];
+          const action = pathParts[1];
+          
+          // Look for zValidator call to find schema
+          let schemaName: string | undefined;
+          let serviceName: string | undefined;
+          let serviceMethod: string | undefined;
+          
+          for (const arg of expr.arguments) {
+            if (arg.type === AST_NODE_TYPES.CallExpression) {
+              const validatorSchema = this.extractSchemaFromValidator(arg);
+              if (validatorSchema) {
+                schemaName = validatorSchema;
+              }
+            }
+            if (arg.type === AST_NODE_TYPES.ArrowFunctionExpression) {
+              const serviceCall = this.extractServiceCall(arg);
+              if (serviceCall) {
+                serviceName = serviceCall.serviceName;
+                serviceMethod = serviceCall.methodName;
+              }
+            }
+          }
+          
+          return {
+            path,
+            method: "POST",
+            domain,
+            action,
+            requiresAuth: isProtected,
+            schemaName,
+            serviceName,
+            serviceMethod,
+            node: expr,
+            location: {
+              filePath: this.apiFilePath,
+              lineNumber: 0,
+              columnNumber: 0,
+            },
+          };
+        }
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Parse a protected route call (protectedRoutes.post)
+   */
+  private parseProtectedRouteCall(expr: any): RouteInfo | null {
+    if (expr.callee?.type === AST_NODE_TYPES.MemberExpression &&
+        expr.callee.object?.name === "protectedRoutes" &&
+        expr.callee.property?.name === "post") {
+      
+      const route = this.parseRouteCall(expr, true);
+      if (route) {
+        route.requiresAuth = true;
+      }
+      return route;
+    }
+    return null;
+  }
+
+  /**
+   * Extract schema name from zValidator call
+   */
+  private extractSchemaFromValidator(expr: any): string | null {
+    if (expr.callee?.name === "zValidator" && expr.arguments.length >= 2) {
+      const schemaArg = expr.arguments[1];
+      if (schemaArg?.type === AST_NODE_TYPES.Identifier) {
+        return schemaArg.name;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Extract service call from arrow function
+   */
+  private extractServiceCall(arrowFunc: any): { serviceName: string; methodName: string } | null {
+    if (arrowFunc.body?.type === AST_NODE_TYPES.BlockStatement) {
+      for (const statement of arrowFunc.body.body) {
+        if (statement.type === AST_NODE_TYPES.VariableDeclaration) {
+          for (const declarator of statement.declarations) {
+            if (declarator.init?.type === AST_NODE_TYPES.AwaitExpression) {
+              const awaitExpr = declarator.init.argument;
+              if (awaitExpr?.type === AST_NODE_TYPES.CallExpression) {
+                const memberExpr = awaitExpr.callee;
+                if (memberExpr?.type === AST_NODE_TYPES.MemberExpression) {
+                  const serviceAccess = memberExpr.object;
+                  if (serviceAccess?.type === AST_NODE_TYPES.MemberExpression &&
+                      serviceAccess.object?.name === "services") {
+                    return {
+                      serviceName: serviceAccess.property?.name || "unknown",
+                      methodName: memberExpr.property?.name || "unknown"
+                    };
+                  }
+                }
+              }
             }
           }
         }
       }
     }
-
-    return procedures;
+    return null;
   }
 
   /**
@@ -485,40 +645,42 @@ export class DynamicAPIExtractor {
    * Process a single endpoint and gather all its metadata
    */
   private async processEndpoint(
-    domain: string,
-    method: string,
-    procedureInfo: any,
-    apiFile: FileInfo
+    route: RouteInfo
   ): Promise<DiscoveredEndpoint | null> {
     const endpoint: DiscoveredEndpoint = {
-      name: `${domain}.${method}`,
-      domain,
-      method,
-      description: this.generateDescription(domain, method),
-      httpPath: `/rpc/${domain}.${method}`,
-      requiresAuth: this.inferAuthRequirement(domain, method),
-      category: this.inferCategory(domain),
-      sourceLocation: procedureInfo.location,
+      name: `${route.domain}.${route.action}`,
+      domain: route.domain,
+      method: route.action,
+      description: this.generateDescription(route.domain, route.action),
+      httpPath: `/rpc${route.path}`,
+      requiresAuth: route.requiresAuth,
+      category: this.inferCategory(route.domain),
+      sourceLocation: route.location,
     };
 
-    // Find input schema from the procedure definition
-    const inputSchemaName = this.extractInputSchemaFromProcedure(
-      procedureInfo.node
-    );
-    if (inputSchemaName && this.schemaRegistry.has(inputSchemaName)) {
-      endpoint.inputSchemaInfo = this.schemaRegistry.get(inputSchemaName);
+    // Find input schema from the route definition
+    if (route.schemaName && this.schemaRegistry.has(route.schemaName)) {
+      const schemaInfo = this.schemaRegistry.get(route.schemaName);
+      if (schemaInfo) {
+        endpoint.inputSchemaInfo = schemaInfo;
+      }
     }
 
     // Find service method information
-    const serviceKey = this.getServiceKey(domain);
-    if (this.serviceRegistry.has(serviceKey)) {
-      const serviceMethods = this.serviceRegistry.get(serviceKey)!;
-      const serviceMethod = serviceMethods.find((m) => m.name === method);
-      if (serviceMethod) {
-        endpoint.serviceInfo = serviceMethod;
-        endpoint.outputSchemaInfo = this.inferOutputSchemaFromReturnType(
-          serviceMethod.returnType
-        );
+    if (route.serviceName && route.serviceMethod) {
+      const serviceKey = route.serviceName;
+      if (this.serviceRegistry.has(serviceKey)) {
+        const serviceMethods = this.serviceRegistry.get(serviceKey)!;
+        const serviceMethod = serviceMethods.find((m) => m.name === route.serviceMethod);
+        if (serviceMethod) {
+          endpoint.serviceInfo = serviceMethod;
+          const outputSchema = this.inferOutputSchemaFromReturnType(
+            serviceMethod.returnType
+          );
+          if (outputSchema) {
+            endpoint.outputSchemaInfo = outputSchema;
+          }
+        }
       }
     }
 
@@ -537,20 +699,17 @@ export class DynamicAPIExtractor {
       ) {
         return node;
       }
-    }
-    return null;
-  }
-
-  private findReturnStatement(functionNode: any): any {
-    if (!functionNode.body?.body) return null;
-
-    for (const statement of functionNode.body.body) {
-      if (statement.type === AST_NODE_TYPES.ReturnStatement) {
-        return statement;
+      if (
+        node.type === AST_NODE_TYPES.ExportNamedDeclaration &&
+        node.declaration?.type === AST_NODE_TYPES.FunctionDeclaration &&
+        node.declaration.id?.name === functionName
+      ) {
+        return node.declaration;
       }
     }
     return null;
   }
+
 
   private extractImports(
     ast: any
@@ -691,29 +850,6 @@ export class DynamicAPIExtractor {
     return parameters;
   }
 
-  private extractInputSchemaFromProcedure(procedureNode: any): string | null {
-    // Look for os.input(SomeSchema) pattern
-    if (procedureNode.value?.type === AST_NODE_TYPES.CallExpression) {
-      const callee = procedureNode.value.callee;
-      if (
-        callee?.type === AST_NODE_TYPES.MemberExpression &&
-        callee.property?.name === "handler"
-      ) {
-        const object = callee.object;
-        if (
-          object?.type === AST_NODE_TYPES.CallExpression &&
-          object.callee?.property?.name === "input"
-        ) {
-          const schemaArg = object.arguments[0];
-          if (schemaArg?.type === AST_NODE_TYPES.Identifier) {
-            return schemaArg.name;
-          }
-        }
-      }
-    }
-
-    return null;
-  }
 
   /**
    * Utility methods
@@ -723,17 +859,6 @@ export class DynamicAPIExtractor {
     return filename.replace(".service.ts", "");
   }
 
-  private getServiceKey(domain: string): string {
-    // Map domain names to service file names
-    const domainToService: Record<string, string> = {
-      auth: "auth",
-      tests: "test-templates",
-      rounds: "rounds",
-      user: "user",
-    };
-
-    return domainToService[domain] || domain;
-  }
 
   private typeAnnotationToString(typeNode: any): string {
     if (!typeNode) return "unknown";
@@ -802,21 +927,9 @@ export class DynamicAPIExtractor {
     return categoryMap[domain] || "Other";
   }
 
-  private inferAuthRequirement(domain: string, method: string): boolean {
-    if (domain === "auth" && ["login", "register"].includes(method)) {
-      return false;
-    }
-    if (domain === "tests" && method === "list") {
-      return false;
-    }
-    if (domain === "tests" && method === "create") {
-      return false;
-    }
-    return true;
-  }
 
   private inferOutputSchemaFromReturnType(
-    returnType: string
+    _returnType: string
   ): SchemaInfo | undefined {
     // For now, return undefined - could be enhanced to create synthetic schemas
     return undefined;
@@ -911,7 +1024,7 @@ export class DynamicAPIExtractor {
 
   private async insertParametersFromSchemaInfo(
     endpointId: number,
-    type: "input" | "output",
+    parameterType: "input" | "output",
     schemaInfo: SchemaInfo
   ): Promise<void> {
     // For now, insert a placeholder - could be enhanced to load and parse actual Zod schemas
@@ -925,7 +1038,7 @@ export class DynamicAPIExtractor {
     insertParam.run(
       endpointId,
       "schema_defined",
-      type,
+      parameterType,
       "object",
       1,
       0,
@@ -936,7 +1049,7 @@ export class DynamicAPIExtractor {
 
   private async insertParametersFromServiceInfo(
     endpointId: number,
-    type: "input" | "output",
+    _parameterType: "input" | "output",
     serviceInfo: ServiceMethodInfo
   ): Promise<void> {
     // Insert service method parameters

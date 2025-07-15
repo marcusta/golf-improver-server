@@ -41,6 +41,7 @@
     "typescript": "^5.8.3"
   },
   "dependencies": {
+    "@hono/zod-validator": "^0.7.1",
     "@modelcontextprotocol/sdk": "^1.13.1",
     "@orpc/client": "^1.5.2",
     "@orpc/server": "^1.5.2",

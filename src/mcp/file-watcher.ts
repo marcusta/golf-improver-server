@@ -13,8 +13,8 @@ import { SimpleAPIExtractor } from './dynamic-api-extractor.js';
 declare const setTimeout: (callback: () => void, ms: number) => any;
 declare const clearTimeout: (id: any) => void;
 
-// We'll create a router by importing the necessary services
-// This is a simplified approach that doesn't require exposing createProcedures
+// We'll create a Hono app by importing the necessary services
+// This is a simplified approach that doesn't require exposing createApiRoutes
 
 export interface WatcherConfig {
   apiDbPath: string;
@@ -27,11 +27,10 @@ export class APIFileWatcher {
   private config: WatcherConfig;
   private debounceTimer: any = null;
   private watchers: any[] = [];
-  private createRouter: () => any;
 
-  constructor(config: WatcherConfig, createRouter: () => any) {
+  constructor(config: WatcherConfig, _createHonoApp: () => any) {
     this.config = config;
-    this.createRouter = createRouter;
+    // _createHonoApp is not currently used but kept for future extensibility
   }
 
   /**
@@ -107,7 +106,7 @@ export class APIFileWatcher {
       filename.includes('api') ||
       filename.includes('schema') ||
       filename.includes('service') ||
-      filename.includes('orpc')
+filename.includes('hono')
     );
   }
 
@@ -132,7 +131,7 @@ export class APIFileWatcher {
       console.log('[API File Watcher] Rebuilding API database...');
 
       // Extract API metadata to database using dynamic approach
-      const apiFilePath = join(process.cwd(), "src/api/orpc-api.ts");
+      const apiFilePath = join(process.cwd(), "src/api/api.ts");
       const extractor = new SimpleAPIExtractor(this.config.apiDbPath, apiFilePath, process.cwd());
       await extractor.extractFromAPI();
       extractor.close();
@@ -154,7 +153,7 @@ export class APIFileWatcher {
  */
 export function createDefaultWatcher(
   apiDbPath: string,
-  createRouter: () => any
+  createHonoApp: () => any
 ): APIFileWatcher {
   const config: WatcherConfig = {
     apiDbPath,
@@ -166,5 +165,5 @@ export function createDefaultWatcher(
     debounceMs: 2000, // 2 second debounce
   };
 
-  return new APIFileWatcher(config, createRouter);
+  return new APIFileWatcher(config, createHonoApp);
 }

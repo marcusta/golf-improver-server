@@ -4,6 +4,7 @@
     "": {
       "name": "golf-improver-server",
       "dependencies": {
+        "@hono/zod-validator": "^0.7.1",
         "@modelcontextprotocol/sdk": "^1.13.1",
         "@orpc/client": "^1.5.2",
         "@orpc/server": "^1.5.2",
@@ -25,8 +26,8 @@
         "drizzle-kit": "^0.31.1",
         "eslint": "^9.29.0",
         "eslint-config-prettier": "^10.1.5",
-        "eslint-plugin-prettier": "^5.5.0",
-        "prettier": "^3.6.0",
+        "eslint-plugin-prettier": "^5.5.1",
+        "prettier": "^3.6.2",
       },
       "peerDependencies": {
         "typescript": "^5.8.3",
@@ -109,6 +110,8 @@
     "@eslint/object-schema": ["@eslint/object-schema@2.1.6", "", {}, "sha512-RBMg5FRL0I0gs51M/guSAj5/e14VQ4tpZnQNWwuDT66P14I43ItmPfIZRhO9fUVIPOAQXU47atlywZ/czoqFPA=="],
 
     "@eslint/plugin-kit": ["@eslint/plugin-kit@0.3.3", "", { "dependencies": { "@eslint/core": "^0.15.1", "levn": "^0.4.1" } }, "sha512-1+WqvgNMhmlAambTvT3KPtCl/Ibr68VldY2XY40SL1CE0ZXiakFR/cbTspaF5HsnpDMvcYYoJHfl4980NBjGag=="],
+
+    "@hono/zod-validator": ["@hono/zod-validator@0.7.1", "", { "peerDependencies": { "hono": ">=3.9.0", "zod": "^3.25.0 || ^4.0.0" } }, "sha512-8+vJT1RvezAx5sN7hiZ5Mis0RMuFL77nBEcqQQgT9ufoLkxr+7ll461WlBJQcGoQSY6EGMClVae19v3s/7bbgQ=="],
 
     "@humanfs/core": ["@humanfs/core@0.19.1", "", {}, "sha512-5DyQ4+1JEUzejeK1JGICcideyfUbGixgS9jNgex5nqkW+cY7WZhxBigmieN5Qnw9ZosSNVC9KQKyb+GUaGyKUA=="],
 

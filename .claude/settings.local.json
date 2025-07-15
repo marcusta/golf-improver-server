@@ -4,7 +4,10 @@
       "Bash(touch:*)",
       "Bash(bun test:*)",
       "Bash(bun run:*)",
-      "Bash(pkill:*)"
+      "Bash(pkill:*)",
+      "Bash(rm:*)",
+      "Bash(bun:*)",
+      "Bash(timeout:*)"
     ],
     "deny": []
   }
