@@ -81,7 +81,8 @@ class APIDatabase {
           e.description,
           e.category,
           e.requires_auth,
-          e.http_path
+          e.http_path,
+          s.rank
         FROM api_endpoints e
         JOIN api_search s ON e.id = s.endpoint_id
         WHERE api_search MATCH ?
@@ -218,6 +219,19 @@ class APIDatabase {
     `);
 
     return examplesQuery.all((endpoint as any).id);
+  }
+
+  /**
+   * Get parameters for a given endpoint ID
+   */
+  _getEndpointParameters(endpointId: number): any[] {
+    const parametersQuery = this.db.prepare(`
+      SELECT parameter_name as name, data_type as dataType, is_required as isRequired, description
+      FROM api_parameters
+      WHERE endpoint_id = ? AND parameter_type = 'input'
+      ORDER BY parameter_name
+    `);
+    return parametersQuery.all(endpointId);
   }
 
   /**
@@ -469,29 +483,47 @@ async function handleToolCall(toolName: string, args: any): Promise<any> {
         // Natural language search
         const results = globalAPIDB.searchAPIs(query, limit);
 
-        const formattedResults = results.map((api) => ({
-          name: api.name,
-          description: api.description,
-          category: api.category,
-          requiresAuth: !!api.requires_auth,
-          httpPath: api.http_path,
-        }));
+        const formattedResults = results.map((api) => {
+          const inputParameters = globalAPIDB._getEndpointParameters(api.id);
+          const confidenceScore = api.rank ? 1.0 - api.rank : 0.0; // Normalize rank to a 0-1 score
+
+          // Generate example tool_code
+          let exampleToolCode = `print(default_api.run_shell_command(command='''curl -X POST -H "Content-Type: application/json" -d '{\n  "jsonrpc": "2.0",\n  "id": "call-api-1",\n  "method": "tools/call",\n  "params": {\n    "name": "c4_executeAPI",\n    "arguments": {\n      "apiName": "${api.name}",\n      "input": {`;
+
+          if (inputParameters.length > 0) {
+            const exampleInput: { [key: string]: any } = {};
+            inputParameters.forEach(param => {
+              // Provide a placeholder example value based on data type
+              if (param.dataType === "string") exampleInput[param.name] = "example_string";
+              else if (param.dataType === "number") exampleInput[param.name] = 123;
+              else if (param.dataType === "boolean") exampleInput[param.name] = true;
+              else exampleInput[param.name] = null; // Default for other types
+            });
+            exampleToolCode += `\n        ${JSON.stringify(exampleInput, null, 8).slice(1, -1).trim()}\n      `;
+          }
+
+          exampleToolCode += `}\n    }\n  }\n}' http://localhost:3102/mcp'''))`;
+
+          return {
+            apiName: api.name,
+            description: api.description,
+            category: api.category,
+            requiresAuth: !!api.requires_auth,
+            confidenceScore: parseFloat(confidenceScore.toFixed(2)),
+            inputParameters: inputParameters.map((p: any) => ({
+              name: p.name,
+              dataType: p.dataType,
+              isRequired: !!p.isRequired,
+              description: p.description,
+            })),
+            example: {
+              tool_code: exampleToolCode,
+            },
+          };
+        });
 
         return {
-          content: [
-            {
-              type: "text",
-              text: `Found ${results.length} APIs matching "${query}":\n\n${formattedResults
-                .map(
-                  (api) =>
-                    `**${api.name}** (${api.category})\n` +
-                    `Description: ${api.description}\n` +
-                    `Auth Required: ${api.requiresAuth ? "Yes" : "No"}\n` +
-                    `HTTP Path: ${api.httpPath}\n`
-                )
-                .join("\n---\n")}`,
-            },
-          ],
+          content: formattedResults,
         };
       }
     }
