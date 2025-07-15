@@ -11,7 +11,7 @@ import { Database } from "bun:sqlite";
 import cors from "cors";
 import "dotenv/config";
 import express, { NextFunction, Request, Response } from "express";
-import { existsSync, readFileSync } from "fs";
+import { existsSync, readFileSync, unlinkSync } from "fs";
 import { join } from "path";
 import { createHonoApp } from "../app.js";
 import { SimpleAPIExtractor } from "./dynamic-api-extractor.js";
@@ -188,9 +188,18 @@ class APIDatabase {
     if (!endpoint) return null;
 
     const parametersQuery = this.db.prepare(`
-      SELECT * FROM api_parameters 
+      SELECT 
+        parameter_name,
+        parameter_type,
+        data_type,
+        is_required,
+        description,
+        array_element_type,
+        referenced_schema,
+        nested_path
+      FROM api_parameters 
       WHERE endpoint_id = ? 
-      ORDER BY parameter_type, parameter_name
+      ORDER BY parameter_type, nested_path, parameter_name
     `);
 
     const parameters = parametersQuery.all((endpoint as any).id);
@@ -226,10 +235,17 @@ class APIDatabase {
    */
   _getEndpointParameters(endpointId: number): any[] {
     const parametersQuery = this.db.prepare(`
-      SELECT parameter_name as name, data_type as dataType, is_required as isRequired, description
+      SELECT 
+        parameter_name as name, 
+        data_type as dataType, 
+        is_required as isRequired, 
+        description,
+        array_element_type as arrayElementType,
+        referenced_schema as referencedSchema,
+        nested_path as nestedPath
       FROM api_parameters
       WHERE endpoint_id = ? AND parameter_type = 'input'
-      ORDER BY parameter_name
+      ORDER BY nested_path, parameter_name
     `);
     return parametersQuery.all(endpointId);
   }
@@ -314,6 +330,79 @@ CREATE VIRTUAL TABLE api_search USING fts5(
 --     SELECT id FROM api_endpoints WHERE name = 'rounds.create'
 --   ) AND parameter_type = 'input';
 `;
+  }
+
+  /**
+   * Format data type with enhanced array information
+   */
+  formatDataType(dataType: string, arrayElementType: string | null, referencedSchema: string | null): string {
+    if (dataType === "array") {
+      if (referencedSchema) {
+        return `array<${referencedSchema}>`;
+      } else if (arrayElementType) {
+        return `array<${arrayElementType}>`;
+      }
+      return "array";
+    }
+    return dataType;
+  }
+
+  /**
+   * Generate parameter description based on schema information
+   */
+  generateParameterDescription(param: any): string {
+    if (param.referencedSchema) {
+      return `Array of ${param.referencedSchema} objects`;
+    }
+    if (param.arrayElementType) {
+      return `Array of ${param.arrayElementType} values`;
+    }
+    if (param.nestedPath && param.nestedPath.includes('.')) {
+      return `Nested parameter: ${param.nestedPath}`;
+    }
+    return param.dataType || "No description available";
+  }
+
+  /**
+   * Get properties of a referenced schema
+   */
+  getReferencedSchemaProperties(schemaName: string): any[] {
+    // Look for parameters that belong to this schema by checking nested_path patterns
+    const query = this.db.prepare(`
+      SELECT DISTINCT 
+        parameter_name,
+        data_type,
+        is_required,
+        description,
+        array_element_type,
+        referenced_schema,
+        nested_path
+      FROM api_parameters 
+      WHERE referenced_schema = ? 
+      OR source_schema_name = ?
+      OR nested_path LIKE '%.%'
+      ORDER BY parameter_name
+    `);
+    
+    const properties = query.all(schemaName, schemaName);
+    
+    // Filter to get only the direct properties of the schema
+    const directProperties = properties.filter((p: any) => {
+      // For nested paths like 'holes.distance', 'holes.hole', 'holes.putts'
+      // we want to extract the property name after the dot
+      if (p.nested_path && p.nested_path.includes('.')) {
+        const parts = p.nested_path.split('.');
+        return parts.length === 2; // Only direct nested properties
+      }
+      return p.source_schema_name === schemaName;
+    });
+    
+    return directProperties.map((p: any) => ({
+      name: p.parameter_name,
+      dataType: this.formatDataType(p.data_type, p.array_element_type, p.referenced_schema),
+      isRequired: !!p.is_required,
+      description: p.description || this.generateParameterDescription(p)
+    }));
   }
 
   close(): void {
@@ -413,6 +502,12 @@ class APIExecutor {
 async function initializeAPI(): Promise<void> {
   console.log("[Advanced MCP Server] Initializing API...");
 
+  // Delete existing API metadata database to ensure fresh schema
+  if (existsSync(API_DB_PATH)) {
+    console.log(`[Advanced MCP Server] Removing existing API metadata database: ${API_DB_PATH}`);
+    unlinkSync(API_DB_PATH);
+  }
+
   // Create database connection
   const dbFileName = process.env["DB_FILE_NAME"];
   if (!dbFileName) {
@@ -484,15 +579,31 @@ async function handleToolCall(toolName: string, args: any): Promise<any> {
         const results = globalAPIDB.searchAPIs(query, limit);
 
         const formattedResults = results.map((api) => {
-          const inputParameters = globalAPIDB._getEndpointParameters(api.id);
+          const inputParameters = globalAPIDB!._getEndpointParameters(api.id);
+          
+          // Apply same filtering logic as in getAPIDetails to avoid duplication
+          const paramsWithReferencedSchemas = inputParameters.filter((p: any) => p.referencedSchema);
+          const filteredInputParameters = inputParameters.filter((p: any) => {
+            if (p.nestedPath && p.nestedPath.includes('.')) {
+              const parentPath = p.nestedPath.split('.')[0];
+              const parentHasReferencedSchema = paramsWithReferencedSchemas.some(
+                (parent: any) => parent.nestedPath === parentPath && parent.referencedSchema
+              );
+              if (parentHasReferencedSchema) {
+                return false;
+              }
+            }
+            return true;
+          });
+          
           const confidenceScore = api.rank ? 1.0 - api.rank : 0.0; // Normalize rank to a 0-1 score
 
           // Generate example tool_code
           let exampleToolCode = `print(default_api.run_shell_command(command='''curl -X POST -H "Content-Type: application/json" -d '{\n  "jsonrpc": "2.0",\n  "id": "call-api-1",\n  "method": "tools/call",\n  "params": {\n    "name": "c4_executeAPI",\n    "arguments": {\n      "apiName": "${api.name}",\n      "input": {`;
 
-          if (inputParameters.length > 0) {
+          if (filteredInputParameters.length > 0) {
             const exampleInput: { [key: string]: any } = {};
-            inputParameters.forEach(param => {
+            filteredInputParameters.forEach(param => {
               // Provide a placeholder example value based on data type
               if (param.dataType === "string") exampleInput[param.name] = "example_string";
               else if (param.dataType === "number") exampleInput[param.name] = 123;
@@ -510,11 +621,11 @@ async function handleToolCall(toolName: string, args: any): Promise<any> {
             category: api.category,
             requiresAuth: !!api.requires_auth,
             confidenceScore: parseFloat(confidenceScore.toFixed(2)),
-            inputParameters: inputParameters.map((p: any) => ({
+            inputParameters: filteredInputParameters.map((p: any) => ({
               name: p.name,
-              dataType: p.dataType,
+              dataType: globalAPIDB!.formatDataType(p.dataType, p.arrayElementType, p.referencedSchema),
               isRequired: !!p.isRequired,
-              description: p.description,
+              description: p.description || globalAPIDB!.generateParameterDescription(p),
             })),
             example: {
               tool_code: exampleToolCode,
@@ -531,7 +642,7 @@ async function handleToolCall(toolName: string, args: any): Promise<any> {
     case "c4_getAPIDetails": {
       const { apiName } = args;
 
-      const details = globalAPIDB.getAPIDetails(apiName);
+      const details = globalAPIDB!.getAPIDetails(apiName);
       if (!details) {
         throw new Error(`API not found: ${apiName}`);
       }
@@ -544,79 +655,85 @@ async function handleToolCall(toolName: string, args: any): Promise<any> {
       );
 
       // Get examples for this endpoint
-      const examples = globalAPIDB.getAPIExamples(apiName);
+      const examples = globalAPIDB!.getAPIExamples(apiName);
 
-      const formatParams = (params: any[]) => {
-        if (params.length === 0) return "None";
-        return params
-          .map(
-            (p) =>
-              `- **${p.parameter_name}** (${p.data_type})${p.is_required ? " *required*" : " *optional*"}\n` +
-              `  ${p.description || "No description available"}\n` +
-              (p.example_value ? `  Example: \`${p.example_value}\`\n` : "")
-          )
-          .join("\n");
+      // Format parameters with enhanced schema information
+      const formatParametersStructured = (params: any[]) => {
+        // First, identify parameters that have referenced schemas
+        const paramsWithReferencedSchemas = params.filter((p: any) => p.referenced_schema);
+        
+        // Filter out nested parameters that are already described in referenced schemas
+        const filteredParams = params.filter((p: any) => {
+          // If this parameter has a nested path with a dot, check if its parent has a referenced schema
+          if (p.nested_path && p.nested_path.includes('.')) {
+            const parentPath = p.nested_path.split('.')[0];
+            // Check if any parameter with this parent path has a referenced schema
+            const parentHasReferencedSchema = paramsWithReferencedSchemas.some(
+              (parent: any) => parent.nested_path === parentPath && parent.referenced_schema
+            );
+            // If parent has referenced schema, skip this nested parameter
+            if (parentHasReferencedSchema) {
+              return false;
+            }
+          }
+          return true;
+        });
+        
+        return filteredParams.map((p: any) => {
+          const param: any = {
+            name: p.parameter_name,
+            dataType: globalAPIDB!.formatDataType(p.data_type, p.array_element_type, p.referenced_schema),
+            isRequired: !!p.is_required,
+            description: p.description || globalAPIDB!.generateParameterDescription(p),
+            nestedPath: p.nested_path || null,
+          };
+          
+          // Add referenced schema details if available
+          if (p.referenced_schema) {
+            param.referencedSchema = {
+              name: p.referenced_schema,
+              properties: globalAPIDB!.getReferencedSchemaProperties(p.referenced_schema)
+            };
+          }
+          
+          return param;
+        });
       };
 
-      const formatExamples = (examples: any[]) => {
-        if (examples.length === 0) return "No examples available.";
-
-        // Group examples by type
-        const inputExamples = examples.filter(
-          (ex) => ex.example_type === "input"
-        );
-        const outputExamples = examples.filter(
-          (ex) => ex.example_type === "output"
-        );
-
-        if (inputExamples.length === 0 && outputExamples.length === 0) {
-          return "No examples available.";
-        }
-
-        let result = "";
-
-        // Display input examples
-        if (inputExamples.length > 0) {
-          result += "### Input Examples\n\n";
-          inputExamples.forEach((ex, index) => {
-            result += `**${ex.title || `Input Example ${index + 1}`}**\n`;
-            if (ex.description) result += `${ex.description}\n\n`;
-            result += `\`\`\`json\n${ex.example_data || "{}"}\n\`\`\`\n\n`;
-          });
-        }
-
-        // Display output examples
-        if (outputExamples.length > 0) {
-          result += "### Output Examples\n\n";
-          outputExamples.forEach((ex, index) => {
-            result += `**${ex.title || `Output Example ${index + 1}`}**\n`;
-            if (ex.description) result += `${ex.description}\n\n`;
-            result += `\`\`\`json\n${ex.example_data || "{}"}\n\`\`\`\n\n`;
-          });
-        }
-
-        return result.trim();
+      const formatExamplesStructured = (examples: any[]) => {
+        return examples.map((ex: any) => ({
+          type: ex.example_type,
+          title: ex.title,
+          description: ex.description,
+          data: ex.example_data ? JSON.parse(ex.example_data) : {}
+        }));
       };
 
       return {
-        content: [
-          {
-            type: "text",
-            text:
-              `# API Details: ${details.name}\n\n` +
-              `**Category:** ${details.category}\n` +
-              `**Description:** ${details.description}\n` +
-              `**Authentication Required:** ${details.requires_auth ? "Yes" : "No"}\n` +
-              `**HTTP Path:** ${details.http_path}\n\n` +
-              `## Code Location\n` +
-              `- **API Definition:** ${details.source_file_path || "N/A"}:${details.source_line_number || "N/A"}\n` +
-              `- **Input Schema:** ${details.input_schema_file || "N/A"}:${details.input_schema_line || "N/A"}\n` +
-              `- **Service Logic:** ${details.service_file_path || "N/A"}:${details.service_method_line || "N/A"}\n\n` +
-              `## Input Parameters\n${formatParams(inputParams)}\n\n` +
-              `## Output Parameters\n${formatParams(outputParams)}\n\n` +
-              `## Examples\n${formatExamples(examples)}`,
+        content: {
+          apiName: details.name,
+          category: details.category,
+          description: details.description,
+          requiresAuth: !!details.requires_auth,
+          httpPath: details.http_path,
+          codeLocation: {
+            apiDefinition: {
+              file: details.source_file_path || null,
+              line: details.source_line_number || null
+            },
+            inputSchema: {
+              file: details.input_schema_file || null,
+              line: details.input_schema_line || null
+            },
+            serviceLogic: {
+              file: details.service_file_path || null,
+              line: details.service_method_line || null
+            }
           },
-        ],
+          inputParameters: formatParametersStructured(inputParams),
+          outputParameters: formatParametersStructured(outputParams),
+          examples: formatExamplesStructured(examples)
+        }
       };
     }
 

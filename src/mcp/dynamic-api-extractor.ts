@@ -160,6 +160,8 @@ export class DynamicAPIExtractor {
         zod_schema TEXT,
         source_schema_name TEXT,
         source_property_path TEXT,
+        array_element_type TEXT,
+        referenced_schema TEXT,
         FOREIGN KEY (endpoint_id) REFERENCES api_endpoints(id) ON DELETE CASCADE
       );
 
@@ -1043,6 +1045,127 @@ export class DynamicAPIExtractor {
     }
   }
 
+  private getZodTypeInfo(zodDef: any): { type: string; arrayElementType?: string; description?: string } {
+    if (!zodDef || !zodDef._def || !zodDef._def.typeName) return { type: "any" };
+    
+    const typeName = zodDef._def.typeName;
+    
+    switch (typeName) {
+      case "ZodString":
+        return { type: "string" };
+      case "ZodNumber":
+        return { type: "number" };
+      case "ZodBoolean":
+        return { type: "boolean" };
+      case "ZodDate":
+        return { type: "date" };
+      case "ZodObject":
+        return { type: "object" };
+      case "ZodArray":
+        const elementType = this.getZodTypeInfo(zodDef._def.type);
+        return { 
+          type: "array", 
+          arrayElementType: elementType.type,
+          description: elementType.arrayElementType ? 
+            `array of ${elementType.arrayElementType}` : 
+            `array of ${elementType.type}`
+        };
+      case "ZodOptional":
+        return this.getZodTypeInfo(zodDef._def.innerType);
+      case "ZodDefault":
+        return this.getZodTypeInfo(zodDef._def.innerType);
+      default:
+        return { type: typeName.replace("Zod", "").toLowerCase() };
+    }
+  }
+
+  private resolveSchemaReference(zodDef: any, schemaModule: any): { type: string; arrayElementType?: string; description?: string; referencedSchema?: string } {
+    if (!zodDef || !zodDef._def) return { type: "any" };
+    
+    const typeName = zodDef._def.typeName;
+    
+    if (typeName === "ZodArray") {
+      const elementType = zodDef._def.type;
+      
+      // Check if the array element is a reference to another schema
+      if (elementType && elementType._def && elementType._def.typeName === "ZodObject") {
+        // Try to find the referenced schema by comparing shape
+        const elementShape = elementType.shape;
+        for (const [schemaName, schema] of Object.entries(schemaModule)) {
+          if (schema && typeof schema === 'object' && (schema as any).shape) {
+            const schemaShape = (schema as any).shape;
+            if (this.compareZodShapes(elementShape, schemaShape)) {
+              return {
+                type: "array",
+                arrayElementType: "object",
+                description: `array of ${schemaName}`,
+                referencedSchema: schemaName
+              };
+            }
+          }
+        }
+      }
+      
+      const elementTypeInfo = this.getZodTypeInfo(elementType);
+      return {
+        type: "array",
+        arrayElementType: elementTypeInfo.type,
+        description: `array of ${elementTypeInfo.type}`
+      };
+    }
+    
+    return this.getZodTypeInfo(zodDef);
+  }
+
+  private compareZodShapes(shape1: any, shape2: any): boolean {
+    if (!shape1 || !shape2) return false;
+    
+    const keys1 = Object.keys(shape1);
+    const keys2 = Object.keys(shape2);
+    
+    if (keys1.length !== keys2.length) return false;
+    
+    for (const key of keys1) {
+      if (!keys2.includes(key)) return false;
+      
+      const type1 = shape1[key]?._def?.typeName;
+      const type2 = shape2[key]?._def?.typeName;
+      
+      if (type1 !== type2) return false;
+    }
+    
+    return true;
+  }
+
+  private extractNestedSchemaParameters(zodSchema: any, schemaModule: any, parameterName: string): Array<{name: string; type: string; description: string; path: string}> {
+    const nestedParams: Array<{name: string; type: string; description: string; path: string}> = [];
+    
+    if (!zodSchema || !zodSchema.shape) return nestedParams;
+    
+    const shape = zodSchema.shape;
+    
+    for (const [fieldName, fieldDef] of Object.entries(shape)) {
+      const fieldPath = `${parameterName}.${fieldName}`;
+      const typeInfo = this.resolveSchemaReference(fieldDef, schemaModule);
+      
+      nestedParams.push({
+        name: fieldName,
+        type: typeInfo.type,
+        description: typeInfo.description || typeInfo.referencedSchema || typeInfo.type,
+        path: fieldPath
+      });
+      
+      // If this is a referenced schema, recursively extract its parameters
+      if (typeInfo.referencedSchema && schemaModule[typeInfo.referencedSchema]) {
+        const referencedSchema = schemaModule[typeInfo.referencedSchema];
+        const nestedFields = this.extractNestedSchemaParameters(referencedSchema, schemaModule, fieldPath);
+        nestedParams.push(...nestedFields);
+      }
+    }
+    
+    return nestedParams;
+  }
+
   private async insertParametersFromSchemaInfo(
     endpointId: number,
     parameterType: "input" | "output",
@@ -1057,23 +1180,51 @@ export class DynamicAPIExtractor {
         const insertParam = this.db.prepare(`
           INSERT INTO api_parameters (
             endpoint_id, parameter_name, parameter_type, data_type,
-            is_required, is_optional, description, source_schema_name
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            is_required, is_optional, description, source_schema_name,
+            array_element_type, referenced_schema, nested_path
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `);
 
         const transaction = this.db.transaction(() => {
           for (const paramName in shape) {
             const paramDef = shape[paramName];
+            const typeInfo = this.resolveSchemaReference(paramDef, schemaModule);
+            
             insertParam.run(
               endpointId,
               paramName,
               parameterType,
-              this.getZodTypeName(paramDef),
+              typeInfo.type,
               !paramDef.isOptional(),
               paramDef.isOptional(),
-              paramDef.description || "",
-              schemaInfo.name
+              typeInfo.description || paramDef.description || "",
+              schemaInfo.name,
+              typeInfo.arrayElementType || null,
+              typeInfo.referencedSchema || null,
+              paramName
             );
+            
+            // If this is an array of objects with a referenced schema, add nested parameters
+            if (typeInfo.referencedSchema && schemaModule[typeInfo.referencedSchema]) {
+              const referencedSchema = schemaModule[typeInfo.referencedSchema];
+              const nestedParams = this.extractNestedSchemaParameters(referencedSchema, schemaModule, paramName);
+              
+              for (const nestedParam of nestedParams) {
+                insertParam.run(
+                  endpointId,
+                  nestedParam.name,
+                  parameterType,
+                  nestedParam.type,
+                  true, // Nested parameters are typically required
+                  false,
+                  nestedParam.description,
+                  typeInfo.referencedSchema,
+                  null,
+                  null,
+                  nestedParam.path
+                );
+              }
+            }
           }
         });
         transaction();
@@ -1089,8 +1240,9 @@ export class DynamicAPIExtractor {
     const insertParam = this.db.prepare(`
       INSERT INTO api_parameters (
         endpoint_id, parameter_name, parameter_type, data_type,
-        is_required, is_optional, description, source_schema_name
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        is_required, is_optional, description, source_schema_name,
+        array_element_type, referenced_schema, nested_path
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     insertParam.run(
       endpointId,
@@ -1100,7 +1252,10 @@ export class DynamicAPIExtractor {
       1,
       0,
       `Parameters defined in ${schemaInfo.name}`,
-      schemaInfo.name
+      schemaInfo.name,
+      null,
+      null,
+      "schema_defined"
     );
   }
 
