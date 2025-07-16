@@ -39,3 +39,7 @@ pnpm-debug.log*
 
 # Bun
 bun.lockb
+
+*.db
+*.sql
+*.sqlite
