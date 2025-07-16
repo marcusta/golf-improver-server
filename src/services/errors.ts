@@ -1,96 +1,74 @@
-import { ORPCError } from "@orpc/server";
+import { HTTPException } from "hono/http-exception";
 
-// We now extend ORPCError and provide a standard error code in the constructor,
-// along with the expected type for any additional data.
-
-export class NotFoundError extends ORPCError<"NOT_FOUND", unknown> {
+export class NotFoundError extends HTTPException {
   constructor(message: string) {
-    // Use the standard 'NOT_FOUND' code recognized by oRPC.
-    // The second generic argument is `unknown` as this error carries no extra data.
-    super("NOT_FOUND", { message });
+    super(404, { message });
   }
 }
 
-export class UnauthorizedError extends ORPCError<"UNAUTHORIZED", unknown> {
+export class UnauthorizedError extends HTTPException {
   constructor(message: string) {
-    // Use the standard 'UNAUTHORIZED' code recognized by oRPC.
-    super("UNAUTHORIZED", { message });
+    super(401, { message });
   }
 }
 
-export class ConflictError<T> extends ORPCError<"CONFLICT", T> {
-  // The 'data' property on ORPCError is perfect for sending back the fresh data.
+export class ConflictError<T> extends HTTPException {
+  public data: T;
   constructor(message: string, freshData: T) {
-    // Use the standard 'CONFLICT' code and pass the generic type T for the data.
-    super("CONFLICT", {
-      message,
-      data: freshData,
-    });
+    super(409, { message });
+    this.data = freshData;
   }
 }
 
-export class ForbiddenError extends ORPCError<"FORBIDDEN", unknown> {
+export class ForbiddenError extends HTTPException {
   constructor(message: string) {
-    // Use the standard 'FORBIDDEN' code recognized by oRPC.
-    super("FORBIDDEN", { message });
+    super(403, { message });
   }
 }
 
-export class TemplateApplicationError extends ORPCError<
-  "BAD_REQUEST",
-  unknown
-> {
+export class TemplateApplicationError extends HTTPException {
   constructor(message: string, templateId?: string) {
     const fullMessage = templateId
       ? `${message} (Template: ${templateId})`
       : message;
-    super("BAD_REQUEST", { message: fullMessage });
+    super(400, { message: fullMessage });
   }
 }
 
-export class ComplianceViolationError extends ORPCError<
-  "UNPROCESSABLE_ACTOR",
-  unknown
-> {
+export class ComplianceViolationError extends HTTPException {
   constructor(message: string, violationCount?: number) {
     const fullMessage = violationCount
       ? `${message} (${violationCount} violations found)`
       : message;
-    super("UNPROCESSABLE_ACTOR", { message: fullMessage });
+    super(422, { message: fullMessage });
   }
 }
 
-export class LockAcquisitionError extends ConflictError<any> {
-  constructor(message: string, existingLock: any) {
+export class LockAcquisitionError extends ConflictError<unknown> {
+  constructor(message: string, existingLock: unknown) {
     super(message, existingLock);
   }
 }
 
-export class InsufficientPermissionsError extends ORPCError<
-  "FORBIDDEN",
-  unknown
-> {
+export class InsufficientPermissionsError extends HTTPException {
   constructor(message: string, requiredRole?: string, userRole?: string) {
     const roleInfo = requiredRole
       ? ` (Required: ${requiredRole}, Current: ${userRole || "none"})`
       : "";
-    super("FORBIDDEN", { message: `${message}${roleInfo}` });
+    super(403, { message: `${message}${roleInfo}` });
   }
 }
 
-export class ValidationError extends ORPCError<"BAD_REQUEST", unknown> {
+export class ValidationError extends HTTPException {
   constructor(message: string, field?: string) {
     const fullMessage = field ? `${message} (Field: ${field})` : message;
-    super("BAD_REQUEST", { message: fullMessage });
+    super(400, { message: fullMessage });
   }
 }
 
-export class ExternalServiceError extends ORPCError<
-  "SERVICE_UNAVAILABLE",
-  unknown
-> {
+export class ExternalServiceError extends HTTPException {
   constructor(message: string, service?: string) {
     const fullMessage = service ? `${message} (Service: ${service})` : message;
-    super("SERVICE_UNAVAILABLE", { message: fullMessage });
+    super(503, { message: fullMessage });
   }
 }

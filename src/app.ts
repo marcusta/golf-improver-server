@@ -6,18 +6,6 @@ import { createApiRoutes } from "./api/api";
 import { createLoggingMiddleware } from "./api/hono-middlewares";
 import { createServices } from "./services";
 import { createMCPRoutes } from "./mcp/advanced-mcp-server-http";
-import { 
-  UnauthorizedError, 
-  NotFoundError, 
-  ValidationError, 
-  ConflictError, 
-  ForbiddenError, 
-  TemplateApplicationError,
-  ComplianceViolationError,
-  LockAcquisitionError,
-  InsufficientPermissionsError,
-  ExternalServiceError
-} from "./services/errors";
 
 /**
  * Creates the main Hono application.
@@ -47,31 +35,9 @@ export function createHonoApp(database: Database) {
   app.onError((err, c) => {
     console.error(`[API Error] Path: ${c.req.path}`, err);
 
+    // All our custom errors now extend HTTPException, so this handles them all
     if (err instanceof HTTPException) {
       return err.getResponse();
-    }
-    
-    // Handle custom service errors
-    if (err instanceof UnauthorizedError) {
-      return c.json({ error: err.message }, 401);
-    }
-    if (err instanceof NotFoundError) {
-      return c.json({ error: err.message }, 404);
-    }
-    if (err instanceof ValidationError || err instanceof TemplateApplicationError) {
-      return c.json({ error: err.message }, 400);
-    }
-    if (err instanceof ConflictError || err instanceof LockAcquisitionError) {
-      return c.json({ error: err.message }, 409);
-    }
-    if (err instanceof ForbiddenError || err instanceof InsufficientPermissionsError) {
-      return c.json({ error: err.message }, 403);
-    }
-    if (err instanceof ComplianceViolationError) {
-      return c.json({ error: err.message }, 422);
-    }
-    if (err instanceof ExternalServiceError) {
-      return c.json({ error: err.message }, 503);
     }
 
     // Fallback for unexpected errors
