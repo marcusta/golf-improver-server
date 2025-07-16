@@ -13,10 +13,16 @@ export function createLoggingMiddleware(
     const start = Date.now();
     await next();
     const duration = Date.now() - start;
-
-    console.log(
-      `[API Request] ${c.req.method} ${c.req.path} | Status: ${c.res.status} | Duration: ${duration}ms`
-    );
+    // also log the request body if it's a POST request
+    if (c.req.method === "POST") {
+      console.log(
+        `[API Request] ${c.req.method} ${c.req.path} | Status: ${c.res.status} | Duration: ${duration}ms | Body: ${JSON.stringify(c.req.raw.body)}`
+      );
+    } else {
+      console.log(
+        `[API Request] ${c.req.method} ${c.req.path} | Status: ${c.res.status} | Duration: ${duration}ms`
+      );
+    }
 
     if (duration > slowThresholdMs) {
       console.warn(
