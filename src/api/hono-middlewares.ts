@@ -55,7 +55,9 @@ export const authMiddleware: MiddlewareHandler<{
     // Add the user payload to the context for downstream handlers
     c.set("user", { id: payload["userId"] as string });
   } catch (error) {
-    console.error("Error verifying token:", error);
+    // Log only the error type, not the full stack trace or token details
+    const errorType = error instanceof Error ? error.constructor.name : 'Unknown';
+    console.warn(`[Auth] Token verification failed: ${errorType}`);
     throw new HTTPException(401, { message: "Invalid or expired token" });
   }
 
