@@ -1,19 +1,15 @@
-#!/usr/bin/env bun
 /**
- * Advanced HTTP MCP Server with Database-Backed API Discovery
+ * MCP Routes - Advanced MCP functionality integrated into Hono
  *
- * This server provides intelligent API discovery, documentation, and execution
- * through a searchable SQLite database via HTTP transport.
+ * This module provides intelligent API discovery, documentation, and execution
+ * through a searchable SQLite database integrated with the main Hono server.
  */
 
-import { createServices } from "@/services/index.js";
 import { Database } from "bun:sqlite";
-import cors from "cors";
-import "dotenv/config";
-import express, { NextFunction, Request, Response } from "express";
 import { existsSync, readFileSync, unlinkSync } from "fs";
+import { Hono } from "hono";
 import { join } from "path";
-import { createHonoApp } from "../app.js";
+import { type Services } from "../services";
 import { SimpleAPIExtractor } from "./dynamic-api-extractor.js";
 import { APIFileWatcher, createDefaultWatcher } from "./file-watcher.js";
 
@@ -38,15 +34,6 @@ interface MCPResponse {
 
 // Database path for API metadata
 const API_DB_PATH = join(process.cwd(), "api-metadata.db");
-
-// Global instances
-let globalAPIDB: APIDatabase | null = null;
-let globalAPIExecutor: APIExecutor | null = null;
-let globalHonoApp: any = null;
-let globalFileWatcher: APIFileWatcher | null = null;
-
-// Server-side session state for authenticated agent access
-const mcpSession: { authToken: string | null } = { authToken: null };
 
 /**
  * Database service for API metadata operations
@@ -251,6 +238,26 @@ class APIDatabase {
   }
 
   /**
+   * Get output parameters for a given endpoint ID
+   */
+  _getEndpointOutputParameters(endpointId: number): any[] {
+    const parametersQuery = this.db.prepare(`
+      SELECT 
+        parameter_name as name, 
+        data_type as dataType, 
+        is_required as isRequired, 
+        description,
+        array_element_type as arrayElementType,
+        referenced_schema as referencedSchema,
+        nested_path as nestedPath
+      FROM api_parameters
+      WHERE endpoint_id = ? AND parameter_type = 'output'
+      ORDER BY nested_path, parameter_name
+    `);
+    return parametersQuery.all(endpointId);
+  }
+
+  /**
    * Execute raw SQL query
    */
   executeSQL(query: string): any[] {
@@ -335,7 +342,11 @@ CREATE VIRTUAL TABLE api_search USING fts5(
   /**
    * Format data type with enhanced array information
    */
-  formatDataType(dataType: string, arrayElementType: string | null, referencedSchema: string | null): string {
+  formatDataType(
+    dataType: string,
+    arrayElementType: string | null,
+    referencedSchema: string | null
+  ): string {
     if (dataType === "array") {
       if (referencedSchema) {
         return `array<${referencedSchema}>`;
@@ -357,7 +368,7 @@ CREATE VIRTUAL TABLE api_search USING fts5(
     if (param.arrayElementType) {
       return `Array of ${param.arrayElementType} values`;
     }
-    if (param.nestedPath && param.nestedPath.includes('.')) {
+    if (param.nestedPath && param.nestedPath.includes(".")) {
       return `Nested parameter: ${param.nestedPath}`;
     }
     return param.dataType || "No description available";
@@ -383,25 +394,29 @@ CREATE VIRTUAL TABLE api_search USING fts5(
       OR nested_path LIKE '%.%'
       ORDER BY parameter_name
     `);
-    
+
     const properties = query.all(schemaName, schemaName);
-    
+
     // Filter to get only the direct properties of the schema
     const directProperties = properties.filter((p: any) => {
       // For nested paths like 'holes.distance', 'holes.hole', 'holes.putts'
       // we want to extract the property name after the dot
-      if (p.nested_path && p.nested_path.includes('.')) {
-        const parts = p.nested_path.split('.');
+      if (p.nested_path && p.nested_path.includes(".")) {
+        const parts = p.nested_path.split(".");
         return parts.length === 2; // Only direct nested properties
       }
       return p.source_schema_name === schemaName;
     });
-    
+
     return directProperties.map((p: any) => ({
       name: p.parameter_name,
-      dataType: this.formatDataType(p.data_type, p.array_element_type, p.referenced_schema),
+      dataType: this.formatDataType(
+        p.data_type,
+        p.array_element_type,
+        p.referenced_schema
+      ),
       isRequired: !!p.is_required,
-      description: p.description || this.generateParameterDescription(p)
+      description: p.description || this.generateParameterDescription(p),
     }));
   }
 
@@ -411,77 +426,65 @@ CREATE VIRTUAL TABLE api_search USING fts5(
 }
 
 /**
- * API Executor - Handles direct HTTP calls to Hono routes
+ * API Executor - Handles calls through Hono app instance
  */
 class APIExecutor {
-  // private _honoApp: any; // Reserved for future direct HTTP call execution
-  private services: any;
+  private honoApp: any;
 
-  constructor(_honoApp: any, services: any) {
-    // this._honoApp = _honoApp; // Reserved for future use
-    this.services = services;
+  constructor(honoApp: any, _services: any) {
+    this.honoApp = honoApp;
   }
 
   /**
-   * Execute an API call directly through service layer
+   * Execute an API call through Hono's app instance
    */
   async executeAPI(
     apiName: string,
     input: any,
     authToken?: string
   ): Promise<any> {
-    const [domain, method] = apiName.split(".");
+    const [domain, method] = apiName.split("/");
 
     if (!domain || !method) {
       throw new Error(
-        `Invalid API name format: ${apiName}. Expected format: domain.method`
+        `Invalid API name format: ${apiName}. Expected format: domain/method`
       );
     }
 
     try {
-      // Map domain to service name
-      const serviceMapping: Record<string, string> = {
-        auth: "auth",
-        rounds: "rounds",
-        tests: "testTemplates",
-        user: "user",
+      // Construct the HTTP path
+      const path = `/rpc/${domain}/${method}`;
+
+      // Prepare headers
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
       };
 
-      const serviceName = serviceMapping[domain];
-      if (!serviceName || !this.services[serviceName]) {
-        throw new Error(`Service not found for domain: ${domain}`);
-      }
-
-      const service = this.services[serviceName];
-      if (!service[method] || typeof service[method] !== "function") {
-        throw new Error(`Method not found: ${domain}.${method}`);
-      }
-
-      // Create user context for authenticated calls
-      let result;
       if (authToken) {
-        // For authenticated calls, we need to decode the token to get user ID
-        // For now, we'll use a mock user ID - in real implementation, decode JWT
-        const mockUserId = "mcp-user";
+        headers["Authorization"] = `Bearer ${authToken}`;
+      }
 
-        // Different services have different method signatures
-        if (domain === "auth") {
-          result = await service[method](input);
-        } else if (domain === "rounds") {
-          result = await service[method](input, mockUserId);
-        } else if (domain === "user") {
-          result = await service[method](mockUserId);
-        } else {
-          result = await service[method](input);
-        }
-      } else {
-        // For public calls
-        result = await service[method](input);
+      // Create a mock request object for Hono
+      const mockRequest = new Request(`http://localhost${path}`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(input),
+      });
+
+      // Call the Hono app directly
+      const response = await this.honoApp.fetch(mockRequest);
+      const responseData = await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          (responseData as any).error ||
+            `HTTP ${response.status}: ${response.statusText}`
+        );
       }
 
       return {
         success: true,
-        data: result,
+        data: responseData,
         apiName,
         timestamp: new Date().toISOString(),
       };
@@ -497,75 +500,72 @@ class APIExecutor {
 }
 
 /**
- * Initialize the API and database
+ * MCP Context - holds all MCP-related state
  */
-async function initializeAPI(): Promise<void> {
-  console.log("[Advanced MCP Server] Initializing API...");
+class MCPContext {
+  public apiDB!: APIDatabase;
+  public apiExecutor: APIExecutor;
+  public fileWatcher: APIFileWatcher;
+  public session: { authToken: string | null } = { authToken: null };
 
-  // Delete existing API metadata database to ensure fresh schema
-  if (existsSync(API_DB_PATH)) {
-    console.log(`[Advanced MCP Server] Removing existing API metadata database: ${API_DB_PATH}`);
-    unlinkSync(API_DB_PATH);
+  constructor(apiApp: any, services: Services) {
+    this.apiExecutor = new APIExecutor(apiApp, services);
+    this.fileWatcher = createDefaultWatcher(API_DB_PATH, () => apiApp);
   }
 
-  // Create database connection
-  const dbFileName = process.env["DB_FILE_NAME"];
-  if (!dbFileName) {
-    throw new Error("DB_FILE_NAME environment variable is not set");
+  async initialize(): Promise<void> {
+    console.log("[MCP] Initializing API metadata extraction...");
+
+    // Delete existing API metadata database to ensure fresh schema
+    if (existsSync(API_DB_PATH)) {
+      console.log(
+        `[MCP] Removing existing API metadata database: ${API_DB_PATH}`
+      );
+      unlinkSync(API_DB_PATH);
+    }
+
+    // Create fresh database instance after file deletion
+    this.apiDB = new APIDatabase(API_DB_PATH);
+
+    // Extract comprehensive API metadata to database using dynamic extractor
+    console.log("[MCP] Extracting comprehensive API metadata...");
+    const apiFilePath = join(process.cwd(), "src/api/api.ts");
+    const extractor = new SimpleAPIExtractor(
+      API_DB_PATH,
+      apiFilePath,
+      process.cwd()
+    );
+    await extractor.extractFromAPI();
+    extractor.close();
+
+    // Setup file watcher for automatic updates
+    console.log("[MCP] Setting up file watcher for automatic updates...");
+    this.fileWatcher.start();
+
+    console.log("[MCP] ✅ API metadata extraction completed");
   }
 
-  const database = new Database(dbFileName);
-  console.log(`[Advanced MCP Server] Connected to database: ${dbFileName}`);
-
-  // Create services and Hono app
-  const services = createServices(database);
-  const { app } = createHonoApp(database);
-  globalHonoApp = app;
-
-  // Initialize API database and executor
-  globalAPIDB = new APIDatabase(API_DB_PATH);
-  globalAPIExecutor = new APIExecutor(globalHonoApp, services);
-
-  // Extract comprehensive API metadata to database using dynamic extractor
-  console.log("[Advanced MCP Server] Extracting comprehensive API metadata...");
-  const apiFilePath = join(process.cwd(), "src/api/api.ts");
-  const extractor = new SimpleAPIExtractor(
-    API_DB_PATH,
-    apiFilePath,
-    process.cwd()
-  );
-  await extractor.extractFromAPI();
-  extractor.close();
-
-  // Setup file watcher for automatic updates
-  console.log(
-    "[Advanced MCP Server] Setting up file watcher for automatic updates..."
-  );
-  globalFileWatcher = createDefaultWatcher(API_DB_PATH, () => globalHonoApp);
-  globalFileWatcher.start();
-
-  console.log("[Advanced MCP Server] API metadata extracted to database");
-  console.log(
-    "[Advanced MCP Server] Services available:",
-    Object.keys(services)
-  );
+  close(): void {
+    this.fileWatcher.stop();
+    this.apiDB.close();
+  }
 }
 
 /**
  * Handle MCP tool calls
  */
-async function handleToolCall(toolName: string, args: any): Promise<any> {
-  if (!globalAPIDB || !globalAPIExecutor) {
-    throw new Error("Server not initialized");
-  }
-
+async function handleToolCall(
+  toolName: string,
+  args: any,
+  mcpContext: MCPContext
+): Promise<any> {
   switch (toolName) {
     case "c4_searchAPI": {
       const { query, searchType = "natural", limit = 10 } = args;
 
       if (searchType === "sql") {
         // Execute raw SQL query
-        const results = globalAPIDB.executeSQL(query);
+        const results = mcpContext.apiDB.executeSQL(query);
         return {
           content: [
             {
@@ -576,26 +576,54 @@ async function handleToolCall(toolName: string, args: any): Promise<any> {
         };
       } else {
         // Natural language search
-        const results = globalAPIDB.searchAPIs(query, limit);
+        const results = mcpContext.apiDB.searchAPIs(query, limit);
 
         const formattedResults = results.map((api) => {
-          const inputParameters = globalAPIDB!._getEndpointParameters(api.id);
-          
+          const inputParameters = mcpContext.apiDB._getEndpointParameters(
+            api.id
+          );
+          const outputParameters = mcpContext.apiDB._getEndpointOutputParameters(
+            api.id
+          );
+
           // Apply same filtering logic as in getAPIDetails to avoid duplication
-          const paramsWithReferencedSchemas = inputParameters.filter((p: any) => p.referencedSchema);
+          const paramsWithReferencedSchemas = inputParameters.filter(
+            (p: any) => p.referencedSchema
+          );
           const filteredInputParameters = inputParameters.filter((p: any) => {
-            if (p.nestedPath && p.nestedPath.includes('.')) {
-              const parentPath = p.nestedPath.split('.')[0];
-              const parentHasReferencedSchema = paramsWithReferencedSchemas.some(
-                (parent: any) => parent.nestedPath === parentPath && parent.referencedSchema
-              );
+            if (p.nestedPath && p.nestedPath.includes(".")) {
+              const parentPath = p.nestedPath.split(".")[0];
+              const parentHasReferencedSchema =
+                paramsWithReferencedSchemas.some(
+                  (parent: any) =>
+                    parent.nestedPath === parentPath && parent.referencedSchema
+                );
               if (parentHasReferencedSchema) {
                 return false;
               }
             }
             return true;
           });
-          
+
+          // Apply same filtering logic for output parameters
+          const outputParamsWithReferencedSchemas = outputParameters.filter(
+            (p: any) => p.referencedSchema
+          );
+          const filteredOutputParameters = outputParameters.filter((p: any) => {
+            if (p.nestedPath && p.nestedPath.includes(".")) {
+              const parentPath = p.nestedPath.split(".")[0];
+              const parentHasReferencedSchema =
+                outputParamsWithReferencedSchemas.some(
+                  (parent: any) =>
+                    parent.nestedPath === parentPath && parent.referencedSchema
+                );
+              if (parentHasReferencedSchema) {
+                return false;
+              }
+            }
+            return true;
+          });
+
           const confidenceScore = api.rank ? 1.0 - api.rank : 0.0; // Normalize rank to a 0-1 score
 
           // Generate example tool_code
@@ -603,11 +631,14 @@ async function handleToolCall(toolName: string, args: any): Promise<any> {
 
           if (filteredInputParameters.length > 0) {
             const exampleInput: { [key: string]: any } = {};
-            filteredInputParameters.forEach(param => {
+            filteredInputParameters.forEach((param) => {
               // Provide a placeholder example value based on data type
-              if (param.dataType === "string") exampleInput[param.name] = "example_string";
-              else if (param.dataType === "number") exampleInput[param.name] = 123;
-              else if (param.dataType === "boolean") exampleInput[param.name] = true;
+              if (param.dataType === "string")
+                exampleInput[param.name] = "example_string";
+              else if (param.dataType === "number")
+                exampleInput[param.name] = 123;
+              else if (param.dataType === "boolean")
+                exampleInput[param.name] = true;
               else exampleInput[param.name] = null; // Default for other types
             });
             exampleToolCode += `\n        ${JSON.stringify(exampleInput, null, 8).slice(1, -1).trim()}\n      `;
@@ -623,9 +654,27 @@ async function handleToolCall(toolName: string, args: any): Promise<any> {
             confidenceScore: parseFloat(confidenceScore.toFixed(2)),
             inputParameters: filteredInputParameters.map((p: any) => ({
               name: p.name,
-              dataType: globalAPIDB!.formatDataType(p.dataType, p.arrayElementType, p.referencedSchema),
+              dataType: mcpContext.apiDB.formatDataType(
+                p.dataType,
+                p.arrayElementType,
+                p.referencedSchema
+              ),
               isRequired: !!p.isRequired,
-              description: p.description || globalAPIDB!.generateParameterDescription(p),
+              description:
+                p.description ||
+                mcpContext.apiDB.generateParameterDescription(p),
+            })),
+            outputParameters: filteredOutputParameters.map((p: any) => ({
+              name: p.name,
+              dataType: mcpContext.apiDB.formatDataType(
+                p.dataType,
+                p.arrayElementType,
+                p.referencedSchema
+              ),
+              isRequired: !!p.isRequired,
+              description:
+                p.description ||
+                mcpContext.apiDB.generateParameterDescription(p),
             })),
             example: {
               tool_code: exampleToolCode,
@@ -642,7 +691,7 @@ async function handleToolCall(toolName: string, args: any): Promise<any> {
     case "c4_getAPIDetails": {
       const { apiName } = args;
 
-      const details = globalAPIDB!.getAPIDetails(apiName);
+      const details = mcpContext.apiDB.getAPIDetails(apiName);
       if (!details) {
         throw new Error(`API not found: ${apiName}`);
       }
@@ -655,21 +704,24 @@ async function handleToolCall(toolName: string, args: any): Promise<any> {
       );
 
       // Get examples for this endpoint
-      const examples = globalAPIDB!.getAPIExamples(apiName);
+      const examples = mcpContext.apiDB.getAPIExamples(apiName);
 
       // Format parameters with enhanced schema information
       const formatParametersStructured = (params: any[]) => {
         // First, identify parameters that have referenced schemas
-        const paramsWithReferencedSchemas = params.filter((p: any) => p.referenced_schema);
-        
+        const paramsWithReferencedSchemas = params.filter(
+          (p: any) => p.referenced_schema
+        );
+
         // Filter out nested parameters that are already described in referenced schemas
         const filteredParams = params.filter((p: any) => {
           // If this parameter has a nested path with a dot, check if its parent has a referenced schema
-          if (p.nested_path && p.nested_path.includes('.')) {
-            const parentPath = p.nested_path.split('.')[0];
+          if (p.nested_path && p.nested_path.includes(".")) {
+            const parentPath = p.nested_path.split(".")[0];
             // Check if any parameter with this parent path has a referenced schema
             const parentHasReferencedSchema = paramsWithReferencedSchemas.some(
-              (parent: any) => parent.nested_path === parentPath && parent.referenced_schema
+              (parent: any) =>
+                parent.nested_path === parentPath && parent.referenced_schema
             );
             // If parent has referenced schema, skip this nested parameter
             if (parentHasReferencedSchema) {
@@ -678,24 +730,31 @@ async function handleToolCall(toolName: string, args: any): Promise<any> {
           }
           return true;
         });
-        
+
         return filteredParams.map((p: any) => {
           const param: any = {
             name: p.parameter_name,
-            dataType: globalAPIDB!.formatDataType(p.data_type, p.array_element_type, p.referenced_schema),
+            dataType: mcpContext.apiDB.formatDataType(
+              p.data_type,
+              p.array_element_type,
+              p.referenced_schema
+            ),
             isRequired: !!p.is_required,
-            description: p.description || globalAPIDB!.generateParameterDescription(p),
+            description:
+              p.description || mcpContext.apiDB.generateParameterDescription(p),
             nestedPath: p.nested_path || null,
           };
-          
+
           // Add referenced schema details if available
           if (p.referenced_schema) {
             param.referencedSchema = {
               name: p.referenced_schema,
-              properties: globalAPIDB!.getReferencedSchemaProperties(p.referenced_schema)
+              properties: mcpContext.apiDB.getReferencedSchemaProperties(
+                p.referenced_schema
+              ),
             };
           }
-          
+
           return param;
         });
       };
@@ -705,7 +764,7 @@ async function handleToolCall(toolName: string, args: any): Promise<any> {
           type: ex.example_type,
           title: ex.title,
           description: ex.description,
-          data: ex.example_data ? JSON.parse(ex.example_data) : {}
+          data: ex.example_data ? JSON.parse(ex.example_data) : {},
         }));
       };
 
@@ -719,21 +778,21 @@ async function handleToolCall(toolName: string, args: any): Promise<any> {
           codeLocation: {
             apiDefinition: {
               file: details.source_file_path || null,
-              line: details.source_line_number || null
+              line: details.source_line_number || null,
             },
             inputSchema: {
               file: details.input_schema_file || null,
-              line: details.input_schema_line || null
+              line: details.input_schema_line || null,
             },
             serviceLogic: {
               file: details.service_file_path || null,
-              line: details.service_method_line || null
-            }
+              line: details.service_method_line || null,
+            },
           },
           inputParameters: formatParametersStructured(inputParams),
           outputParameters: formatParametersStructured(outputParams),
-          examples: formatExamplesStructured(examples)
-        }
+          examples: formatExamplesStructured(examples),
+        },
       };
     }
 
@@ -742,12 +801,12 @@ async function handleToolCall(toolName: string, args: any): Promise<any> {
       let { authToken } = args;
 
       // If no token is provided in the call, use the one from our session
-      if (!authToken && mcpSession.authToken) {
+      if (!authToken && mcpContext.session.authToken) {
         console.log(`[MCP Server] Using stored session token for ${apiName}`);
-        authToken = mcpSession.authToken;
+        authToken = mcpContext.session.authToken;
       }
 
-      const result = await globalAPIExecutor.executeAPI(
+      const result = await mcpContext.apiExecutor.executeAPI(
         apiName,
         input,
         authToken
@@ -785,7 +844,7 @@ async function handleToolCall(toolName: string, args: any): Promise<any> {
         content: [
           {
             type: "text",
-            text: `# API Metadata Database Schema\n\n${globalAPIDB.getSchema()}`,
+            text: `# API Metadata Database Schema\n\n${mcpContext.apiDB.getSchema()}`,
           },
         ],
       };
@@ -793,17 +852,15 @@ async function handleToolCall(toolName: string, args: any): Promise<any> {
 
     case "c4_login": {
       const { email, password } = args;
-      if (!globalAPIExecutor) throw new Error("Executor not initialized");
-
       console.log(`[MCP Server] Attempting login for ${email}`);
-      const result = await globalAPIExecutor.executeAPI("auth.login", {
+      const result = await mcpContext.apiExecutor.executeAPI("auth/login", {
         email,
         password,
       });
 
       if (result.success && result.data.token) {
         // Store the token in our server-side session
-        mcpSession.authToken = result.data.token;
+        mcpContext.session.authToken = result.data.token;
         console.log(`[MCP Server] Login successful. Session token stored.`);
         return {
           content: [
@@ -814,7 +871,7 @@ async function handleToolCall(toolName: string, args: any): Promise<any> {
           ],
         };
       } else {
-        mcpSession.authToken = null; // Clear any old token
+        mcpContext.session.authToken = null; // Clear any old token
         console.error("[MCP Server] Login failed:", result.error);
         throw new Error(
           `Login failed: ${result.error || "Invalid credentials"}`
@@ -824,7 +881,7 @@ async function handleToolCall(toolName: string, args: any): Promise<any> {
 
     case "c4_logout": {
       console.log("[MCP Server] Logging out and clearing session token.");
-      mcpSession.authToken = null;
+      mcpContext.session.authToken = null;
       return {
         content: [
           {
@@ -843,9 +900,14 @@ async function handleToolCall(toolName: string, args: any): Promise<any> {
 /**
  * Handle MCP requests
  */
-async function handleMCPRequest(request: MCPRequest): Promise<MCPResponse> {
+async function handleMCPRequest(
+  request: MCPRequest,
+  mcpContext: MCPContext
+): Promise<MCPResponse> {
   const { method, params, id } = request;
-
+  console.log(`[MCP Server] Handling request: ${method}`);
+  console.log(`[MCP Server] Params: ${JSON.stringify(params, null, 2)}`);
+  console.log(`[MCP Server] ID: ${id}`);
   try {
     switch (method) {
       case "initialize":
@@ -858,7 +920,7 @@ async function handleMCPRequest(request: MCPRequest): Promise<MCPResponse> {
               tools: {},
             },
             serverInfo: {
-              name: "c4-arch-advanced-mcp",
+              name: "integrated-mcp",
               version: "1.0.0",
             },
           },
@@ -908,7 +970,7 @@ async function handleMCPRequest(request: MCPRequest): Promise<MCPResponse> {
                     apiName: {
                       type: "string",
                       description:
-                        'Full API name in format "domain.method" (e.g., "auth.register", "workspaces.create")',
+                        'Full API name in format "domain/method" (e.g., "auth/register", "rounds/create")',
                     },
                   },
                   required: ["apiName"],
@@ -923,7 +985,7 @@ async function handleMCPRequest(request: MCPRequest): Promise<MCPResponse> {
                   properties: {
                     apiName: {
                       type: "string",
-                      description: 'Full API name in format "domain.method"',
+                      description: 'Full API name in format "domain/method"',
                     },
                     input: {
                       type: "object",
@@ -981,7 +1043,7 @@ async function handleMCPRequest(request: MCPRequest): Promise<MCPResponse> {
 
       case "tools/call": {
         const { name: toolName, arguments: toolArgs } = params;
-        const result = await handleToolCall(toolName, toolArgs);
+        const result = await handleToolCall(toolName, toolArgs, mcpContext);
 
         return {
           jsonrpc: "2.0",
@@ -1013,154 +1075,97 @@ async function handleMCPRequest(request: MCPRequest): Promise<MCPResponse> {
 }
 
 /**
- * Main function to start the server
+ * Create MCP routes for integration with main Hono app
  */
-async function main() {
-  try {
-    console.log("[Advanced HTTP MCP Server] Starting up...");
+export function createMCPRoutes(apiApp: Hono, services: Services) {
+  const app = new Hono();
 
-    // Initialize API and database
-    await initializeAPI();
+  // Lazy initialization of MCP context
+  let mcpContext: MCPContext | null = null;
 
-    // Create Express app
-    const app = express();
+  const getMCPContext = async () => {
+    if (!mcpContext) {
+      mcpContext = new MCPContext(apiApp, services);
+      await mcpContext.initialize();
+    }
+    return mcpContext;
+  };
 
-    // Middleware
-    app.use(cors());
-    app.use(express.json({ limit: "10mb" }));
-
-    // Add request logging
-    app.use((req: Request, _res: Response, next: NextFunction) => {
-      console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
-      next();
-    });
-
-    // MCP endpoint
-    app.post("/mcp", async (req: Request, res: Response) => {
-      try {
-        const mcpResponse = await handleMCPRequest(req.body);
-        res.json(mcpResponse);
-      } catch (error) {
-        console.error("[Advanced HTTP MCP] Error handling MCP request:", error);
-        res.status(500).json({
+  // MCP endpoint
+  app.post("/", async (c) => {
+    try {
+      const body = await c.req.json();
+      const context = await getMCPContext();
+      const mcpResponse = await handleMCPRequest(body, context);
+      return c.json(mcpResponse);
+    } catch (error) {
+      console.error("[MCP] Error handling request:", error);
+      return c.json(
+        {
           jsonrpc: "2.0",
           error: {
             code: -32603,
             message: "Internal server error",
           },
-        });
-      }
-    });
+        },
+        500
+      );
+    }
+  });
 
-    // Health check endpoint
-    app.get("/health", (_req: Request, res: Response) => {
-      res.json({
-        status: "healthy",
-        timestamp: new Date().toISOString(),
-        server: "c4-arch-advanced-mcp",
-        version: "1.0.0",
-        protocol: "MCP 2024-11-05",
-        features: [
-          "Database-backed API discovery",
-          "Intelligent search (natural language + SQL)",
-          "Direct API execution",
-          "Real-time schema access",
-        ],
+  // Health check endpoint
+  app.get("/health", (c) => {
+    return c.json({
+      status: "healthy",
+      timestamp: new Date().toISOString(),
+      server: "integrated-mcp",
+      version: "1.0.0",
+      protocol: "MCP 2024-11-05",
+      features: [
+        "Database-backed API discovery",
+        "Intelligent search (natural language + SQL)",
+        "Direct API execution",
+        "Real-time schema access",
+      ],
+    });
+  });
+
+  // Tools list endpoint for debugging
+  app.get("/tools", (c) => {
+    return c.json({
+      tools: [
+        "c4_searchAPI - Search APIs by functionality or SQL query",
+        "c4_getAPIDetails - Get comprehensive API documentation",
+        "c4_executeAPI - Execute API calls directly",
+        "c4_getDBSchema - Get database schema for custom queries",
+      ],
+    });
+  });
+
+  // Database info endpoint
+  app.get("/database", async (c) => {
+    try {
+      const context = await getMCPContext();
+      const endpoints = context.apiDB.executeSQL(
+        "SELECT COUNT(*) as count FROM api_endpoints"
+      );
+      const categories = context.apiDB.executeSQL(`
+        SELECT category, COUNT(*) as count 
+        FROM api_endpoints 
+        GROUP BY category 
+        ORDER BY count DESC
+      `);
+
+      return c.json({
+        endpoints: endpoints[0],
+        categories,
+        database_path: API_DB_PATH,
       });
-    });
+    } catch (error) {
+      console.error("[MCP] Database query error:", error);
+      return c.json({ error: "Database query failed" }, 500);
+    }
+  });
 
-    // Tools list endpoint for debugging
-    app.get("/mcp/tools", (_req: Request, res: Response) => {
-      res.json({
-        tools: [
-          "c4_searchAPI - Search APIs by functionality or SQL query",
-          "c4_getAPIDetails - Get comprehensive API documentation",
-          "c4_executeAPI - Execute API calls directly",
-          "c4_getDBSchema - Get database schema for custom queries",
-        ],
-      });
-    });
-
-    // Database info endpoint
-    app.get("/mcp/database", (_req: Request, res: Response) => {
-      if (!globalAPIDB) {
-        res.status(500).json({ error: "Database not initialized" });
-        return;
-      }
-
-      try {
-        const endpoints = globalAPIDB.executeSQL(
-          "SELECT COUNT(*) as count FROM api_endpoints"
-        );
-        const categories = globalAPIDB.executeSQL(`
-          SELECT category, COUNT(*) as count 
-          FROM api_endpoints 
-          GROUP BY category 
-          ORDER BY count DESC
-        `);
-
-        res.json({
-          endpoints: endpoints[0],
-          categories,
-          database_path: API_DB_PATH,
-        });
-      } catch (error) {
-        res.status(500).json({ error: "Database query failed" });
-      }
-    });
-
-    // Start server
-    const port = process.env["PORT"] || 3102;
-    app.listen(port, () => {
-      console.log(
-        `[Advanced HTTP MCP Server] Server running on http://localhost:${port}`
-      );
-      console.log(
-        `[Advanced HTTP MCP Server] MCP endpoint: http://localhost:${port}/mcp`
-      );
-      console.log(
-        `[Advanced HTTP MCP Server] Health check: http://localhost:${port}/health`
-      );
-      console.log(
-        `[Advanced HTTP MCP Server] Tools list: http://localhost:${port}/mcp/tools`
-      );
-      console.log(
-        `[Advanced HTTP MCP Server] Database info: http://localhost:${port}/mcp/database`
-      );
-      console.log("[Advanced HTTP MCP Server] Ready to accept MCP connections");
-    });
-  } catch (error) {
-    console.error("[Advanced HTTP MCP Server] Failed to start:", error);
-    process.exit(1);
-  }
+  return app;
 }
-
-// Handle graceful shutdown
-process.on("SIGINT", () => {
-  console.log(
-    "[Advanced HTTP MCP Server] Received SIGINT, shutting down gracefully..."
-  );
-  if (globalFileWatcher) {
-    globalFileWatcher.stop();
-  }
-  if (globalAPIDB) {
-    globalAPIDB.close();
-  }
-  process.exit(0);
-});
-
-process.on("SIGTERM", () => {
-  console.log(
-    "[Advanced HTTP MCP Server] Received SIGTERM, shutting down gracefully..."
-  );
-  if (globalFileWatcher) {
-    globalFileWatcher.stop();
-  }
-  if (globalAPIDB) {
-    globalAPIDB.close();
-  }
-  process.exit(0);
-});
-
-// Start the server
-main();

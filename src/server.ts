@@ -56,6 +56,25 @@ const { app } = createHonoApp(database);
 // log("debug", `Available procedures: ${Object.keys(app).join(", ")}`);
 showRoutes(app);
 
+// --- Graceful Shutdown Handling ---
+function gracefulShutdown(signal: string) {
+  log("info", `Received ${signal}, shutting down gracefully...`);
+  
+  // Cleanup MCP context if it exists
+  if (typeof (app as any).cleanup === 'function') {
+    (app as any).cleanup();
+  }
+  
+  // Close database connection
+  database.close();
+  
+  log("info", "Graceful shutdown completed");
+  process.exit(0);
+}
+
+process.on("SIGINT", () => gracefulShutdown("SIGINT"));
+process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+
 // --- Start Server ---
 const port = process.env["PORT"] ? parseInt(process.env["PORT"]) : 3100;
 log("info", `🚀 Server starting on port ${port}`);

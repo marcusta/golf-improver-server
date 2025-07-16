@@ -5,6 +5,7 @@ import { HTTPException } from "hono/http-exception";
 import { createApiRoutes } from "./api/api";
 import { createLoggingMiddleware } from "./api/hono-middlewares";
 import { createServices } from "./services";
+import { createMCPRoutes } from "./mcp/advanced-mcp-server-http";
 import { 
   UnauthorizedError, 
   NotFoundError, 
@@ -37,6 +38,10 @@ export function createHonoApp(database: Database) {
   // 4. Mount API routes
   const apiRoutes = createApiRoutes(services);
   app.route("/rpc", apiRoutes);
+  
+  // 5. Mount MCP routes (async initialization will happen later)
+  const mcpRoutes = createMCPRoutes(app, services);
+  app.route("/mcp", mcpRoutes);
 
   // --- Global Error Handling ---
   app.onError((err, c) => {

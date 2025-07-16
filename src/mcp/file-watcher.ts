@@ -21,6 +21,7 @@ export interface WatcherConfig {
   watchPaths: string[];
   debounceMs: number;
   onRebuild?: () => Promise<void>;
+  skipInitialBuild?: boolean;
 }
 
 export class APIFileWatcher {
@@ -63,8 +64,10 @@ export class APIFileWatcher {
       }
     }
 
-    // Initial build
-    this.rebuildDatabase();
+    // Initial build (unless skipped)
+    if (!this.config.skipInitialBuild) {
+      this.rebuildDatabase();
+    }
   }
 
   /**
@@ -163,6 +166,7 @@ export function createDefaultWatcher(
       join(process.cwd(), 'src/api/schemas'),
     ],
     debounceMs: 2000, // 2 second debounce
+    skipInitialBuild: true, // Skip initial build to avoid race condition with main initialization
   };
 
   return new APIFileWatcher(config, createHonoApp);

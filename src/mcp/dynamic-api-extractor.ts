@@ -620,6 +620,45 @@ export class DynamicAPIExtractor {
   }
 
   /**
+   * Infer output schema based on endpoint naming conventions
+   */
+  private inferOutputSchema(domain: string, method: string): SchemaInfo | undefined {
+    // Map API endpoints to their expected response schemas
+    const outputSchemaMap: Record<string, string> = {
+      "rounds/get": "RoundDetailsSchema",
+      "rounds/create": "CreateRoundResponseSchema", 
+      "rounds/list": "ListRoundsResponseSchema",
+      "auth/login": "AuthResponseSchema",
+      "auth/register": "AuthResponseSchema",
+      "tests/list": "ListTestsResponseSchema",
+      "tests/create": "CreateTestResponseSchema",
+      "user/profile": "UserProfileResponseSchema",
+    };
+
+    const endpointKey = `${domain}/${method}`;
+    const expectedSchemaName = outputSchemaMap[endpointKey];
+    
+    if (expectedSchemaName) {
+      // Look for the schema in our registry
+      const schema = this.schemaRegistry.get(expectedSchemaName);
+      if (schema) {
+        return schema;
+      }
+      
+      // If not found, create a synthetic schema info
+      const schemaFilePath = join(this.projectRoot, `src/api/schemas/${domain}.ts`);
+      return {
+        name: expectedSchemaName,
+        filePath: schemaFilePath,
+        lineNumber: 0,
+        properties: {},
+      };
+    }
+
+    return undefined;
+  }
+
+  /**
    * Discover service methods in a file
    */
   private async discoverServicesInFile(fileInfo: FileInfo): Promise<void> {
@@ -650,7 +689,7 @@ export class DynamicAPIExtractor {
     route: RouteInfo
   ): Promise<DiscoveredEndpoint | null> {
     const endpoint: DiscoveredEndpoint = {
-      name: `${route.domain}.${route.action}`,
+      name: `${route.domain}/${route.action}`,
       domain: route.domain,
       method: route.action,
       description: this.generateDescription(route.domain, route.action),
@@ -668,6 +707,12 @@ export class DynamicAPIExtractor {
       }
     }
 
+    // Find output schema based on endpoint naming conventions
+    const outputSchema = this.inferOutputSchema(route.domain, route.action);
+    if (outputSchema) {
+      endpoint.outputSchemaInfo = outputSchema;
+    }
+
     // Find service method information
     if (route.serviceName && route.serviceMethod) {
       const serviceKey = route.serviceName;
@@ -676,11 +721,14 @@ export class DynamicAPIExtractor {
         const serviceMethod = serviceMethods.find((m) => m.name === route.serviceMethod);
         if (serviceMethod) {
           endpoint.serviceInfo = serviceMethod;
-          const outputSchema = this.inferOutputSchemaFromReturnType(
-            serviceMethod.returnType
-          );
-          if (outputSchema) {
-            endpoint.outputSchemaInfo = outputSchema;
+          // If no output schema found from naming convention, try to infer from return type
+          if (!endpoint.outputSchemaInfo) {
+            const returnTypeSchema = this.inferOutputSchemaFromReturnType(
+              serviceMethod.returnType
+            );
+            if (returnTypeSchema) {
+              endpoint.outputSchemaInfo = returnTypeSchema;
+            }
           }
         }
       }
@@ -1007,6 +1055,14 @@ export class DynamicAPIExtractor {
         endpointId,
         "input",
         endpoint.inputSchemaInfo
+      );
+    }
+
+    if (endpoint.outputSchemaInfo) {
+      await this.insertParametersFromSchemaInfo(
+        endpointId,
+        "output",
+        endpoint.outputSchemaInfo
       );
     }
 
