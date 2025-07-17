@@ -3,6 +3,7 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { HTTPException } from "hono/http-exception";
 import { createApiRoutes } from "./api/api";
+import { AuthError } from "./api/auth-errors";
 import { createLoggingMiddleware } from "./api/hono-middlewares";
 import { createServices } from "./services";
 import { createMCPRoutes } from "./mcp/advanced-mcp-server-http";
@@ -34,6 +35,11 @@ export function createHonoApp(database: Database) {
   // --- Global Error Handling ---
   app.onError((err, c) => {
     console.error(`[API Error] Path: ${c.req.path}`, err);
+
+    // Handle our custom auth errors
+    if (err instanceof AuthError) {
+      return c.json(err.toJSON(), 401);
+    }
 
     // All our custom errors now extend HTTPException, so this handles them all
     if (err instanceof HTTPException) {

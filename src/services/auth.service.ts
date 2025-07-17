@@ -1,17 +1,64 @@
 import type { Database } from "bun:sqlite";
 import "dotenv/config";
-import { eq } from "drizzle-orm";
-import { sign } from "hono/jwt";
-import type { LoginUserType, RegisterUserType } from "../api/schemas/auth";
+import { eq, and, isNull, gte } from "drizzle-orm";
+import { sign, verify } from "hono/jwt";
+import { createHash, randomBytes } from "node:crypto";
+import type { LoginUserType, RegisterUserType, RefreshTokenType } from "../api/schemas/auth";
 import { getDb } from "../db";
 import * as schema from "../db/schema";
 import { NotFoundError } from "./errors";
+import { InvalidCredentialsError, InvalidRefreshTokenError, RegistrationFailedError } from "../api/auth-errors";
 
 export class AuthService {
   private db: ReturnType<typeof getDb>;
 
   constructor(database: Database) {
     this.db = getDb(database);
+  }
+
+  private async generateTokens(userId: string): Promise<{
+    access_token: string;
+    refresh_token: string;
+    expires_in: number;
+    token_type: string;
+  }> {
+    const jwtSecret = process.env["JWT_SECRET"];
+    if (!jwtSecret) {
+      throw new Error("JWT_SECRET environment variable is not set");
+    }
+
+    // Generate access token (1 hour)
+    const accessTokenExp = Math.floor(Date.now() / 1000) + (60 * 60);
+    const accessToken = await sign({
+      userId,
+      exp: accessTokenExp
+    }, jwtSecret);
+
+    // Generate refresh token (30 days)
+    const refreshTokenPayload = randomBytes(32).toString('hex');
+    const refreshTokenExp = Math.floor(Date.now() / 1000) + (30 * 24 * 60 * 60);
+    const refreshToken = await sign({
+      userId,
+      payload: refreshTokenPayload,
+      type: "refresh",
+      exp: refreshTokenExp,
+      iat: Math.floor(Date.now() / 1000)
+    }, jwtSecret);
+
+    // Store refresh token hash in database
+    const tokenHash = createHash('sha256').update(refreshToken).digest('hex');
+    await this.db.insert(schema.refreshTokens).values({
+      userId,
+      tokenHash,
+      expiresAt: new Date(refreshTokenExp * 1000)
+    });
+
+    return {
+      access_token: accessToken,
+      refresh_token: refreshToken,
+      expires_in: 3600,
+      token_type: "Bearer"
+    };
   }
 
   async register(input: RegisterUserType) {
@@ -22,7 +69,7 @@ export class AuthService {
 
       if (existingUser) {
         // Use generic error to prevent email enumeration during registration
-        throw new Error("Registration failed. Please try again with different details.");
+        throw new RegistrationFailedError("Registration failed. Please try again with different details.");
       }
 
       const passwordHash = await Bun.password.hash(input.password);
@@ -37,26 +84,15 @@ export class AuthService {
         })
         .returning();
 
-      const jwtSecret = process.env["JWT_SECRET"];
-      if (!jwtSecret) {
-        throw new Error("JWT_SECRET environment variable is not set");
-      }
-
-      // Add JWT expiration (24 hours)
-      const expirationTime = Math.floor(Date.now() / 1000) + (24 * 60 * 60);
-      const token = await sign({ 
-        userId: newUser[0]!.id,
-        exp: expirationTime 
-      }, jwtSecret);
+      const tokens = await this.generateTokens(newUser[0]!.id);
 
       return {
-        token,
+        ...tokens,
         user: {
           id: newUser[0]!.id,
           email: newUser[0]!.email,
-          firstName: newUser[0]!.firstName,
-          lastName: newUser[0]!.lastName,
-          createdAt: new Date(newUser[0]!.createdAt).toISOString(),
+          first_name: newUser[0]!.firstName,
+          last_name: newUser[0]!.lastName,
         },
       };
     } catch (error) {
@@ -81,7 +117,7 @@ export class AuthService {
     // Only proceed if both user exists AND password is valid
     if (!user || !isValidPassword) {
       // Use generic error message to prevent email enumeration
-      throw new NotFoundError("Invalid email or password");
+      throw new InvalidCredentialsError("Invalid email or password");
     }
 
     await this.db
@@ -89,27 +125,91 @@ export class AuthService {
       .set({ lastLoginAt: new Date() })
       .where(eq(schema.users.id, user.id));
 
+    const tokens = await this.generateTokens(user.id);
+
+    return {
+      ...tokens,
+      user: {
+        id: user.id,
+        email: user.email,
+        first_name: user.firstName,
+        last_name: user.lastName,
+      },
+    };
+  }
+
+  async refreshToken(input: RefreshTokenType) {
     const jwtSecret = process.env["JWT_SECRET"];
     if (!jwtSecret) {
       throw new Error("JWT_SECRET environment variable is not set");
     }
 
-    // Add JWT expiration (24 hours)
-    const expirationTime = Math.floor(Date.now() / 1000) + (24 * 60 * 60);
-    const token = await sign({ 
-      userId: user.id,
-      exp: expirationTime 
-    }, jwtSecret);
+    try {
+      // Verify refresh token
+      const payload = await verify(input.refresh_token, jwtSecret) as any;
+      
+      if (payload.type !== "refresh") {
+        throw new InvalidRefreshTokenError("Invalid token type");
+      }
 
-    return {
-      token,
-      user: {
-        id: user.id,
-        email: user.email,
-        firstName: user.firstName,
-        lastName: user.lastName,
-        lastLoginAt: new Date().toISOString(),
-      },
-    };
+      // Check if token exists in database and is not revoked
+      const tokenHash = createHash('sha256').update(input.refresh_token).digest('hex');
+      const storedToken = await this.db.query.refreshTokens.findFirst({
+        where: and(
+          eq(schema.refreshTokens.tokenHash, tokenHash),
+          isNull(schema.refreshTokens.revokedAt),
+          gte(schema.refreshTokens.expiresAt, new Date())
+        )
+      });
+
+      if (!storedToken) {
+        throw new InvalidRefreshTokenError("Refresh token is invalid or expired");
+      }
+
+      // Revoke old refresh token
+      await this.db
+        .update(schema.refreshTokens)
+        .set({ revokedAt: new Date() })
+        .where(eq(schema.refreshTokens.id, storedToken.id));
+
+      // Generate new tokens
+      const tokens = await this.generateTokens(storedToken.userId);
+
+      return tokens;
+    } catch (error) {
+      if (error instanceof InvalidRefreshTokenError) {
+        throw error;
+      }
+      console.error("Error refreshing token:", error);
+      throw new InvalidRefreshTokenError("Refresh token is invalid or expired");
+    }
+  }
+
+  async logout(input: RefreshTokenType) {
+    try {
+      const tokenHash = createHash('sha256').update(input.refresh_token).digest('hex');
+      
+      // Revoke the refresh token
+      const result = await this.db
+        .update(schema.refreshTokens)
+        .set({ revokedAt: new Date() })
+        .where(and(
+          eq(schema.refreshTokens.tokenHash, tokenHash),
+          isNull(schema.refreshTokens.revokedAt)
+        ))
+        .returning();
+
+      if (result.length === 0) {
+        throw new InvalidRefreshTokenError("Token is invalid or already expired");
+      }
+
+      return { message: "Successfully logged out" };
+    } catch (error) {
+      if (error instanceof InvalidRefreshTokenError) {
+        throw error;
+      }
+      console.error("Error logging out:", error);
+      throw new InvalidRefreshTokenError("Token is invalid or already expired");
+    }
   }
 }

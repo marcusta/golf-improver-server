@@ -61,3 +61,18 @@ export const holeResults = sqliteTable("hole_results", {
   distance: real("distance").notNull(), // Distance in meters
   putts: integer("putts").notNull(), // Number of putts taken
 });
+
+export const refreshTokens = sqliteTable("refresh_tokens", {
+  id: text("id")
+    .primaryKey()
+    .$defaultFn(() => randomUUID()),
+  userId: text("user_id")
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  tokenHash: text("token_hash", { length: 512 }).notNull().unique(), // SHA-256 hash of refresh token
+  expiresAt: integer("expires_at", { mode: "timestamp" }).notNull(),
+  createdAt: integer("created_at", { mode: "timestamp" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+  revokedAt: integer("revoked_at", { mode: "timestamp" }), // NULL = active, timestamp = revoked
+});

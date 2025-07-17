@@ -55,10 +55,13 @@ describe("Putting Test Suite API", () => {
 
       expect(response.status).toBe(200);
       const data = await response.json();
-      expect(data.token).toBeDefined();
+      expect(data.access_token).toBeDefined();
+      expect(data.refresh_token).toBeDefined();
+      expect(data.expires_in).toBe(3600);
+      expect(data.token_type).toBe("Bearer");
       expect(data.user.email).toBe("newuser@example.com");
-      expect(data.user.firstName).toBe("New");
-      expect(data.user.lastName).toBe("User");
+      expect(data.user.first_name).toBe("New");
+      expect(data.user.last_name).toBe("User");
     });
 
     test("should login existing user", async () => {
@@ -69,9 +72,13 @@ describe("Putting Test Suite API", () => {
 
       expect(response.status).toBe(200);
       const data = await response.json();
-      expect(data.token).toBeDefined();
+      expect(data.access_token).toBeDefined();
+      expect(data.refresh_token).toBeDefined();
+      expect(data.expires_in).toBe(3600);
+      expect(data.token_type).toBe("Bearer");
       expect(data.user.email).toBe("test@example.com");
-      expect(data.user.lastLoginAt).toBeDefined();
+      expect(data.user.first_name).toBeDefined();
+      expect(data.user.last_name).toBeDefined();
     });
 
     test("should reject invalid credentials", async () => {
@@ -80,7 +87,86 @@ describe("Putting Test Suite API", () => {
         password: "wrongpassword",
       });
 
-      expect(response.status).toBe(404);
+      expect(response.status).toBe(401);
+      const data = await response.json();
+      expect(data.error).toBe("invalid_credentials");
+    });
+
+    test("should refresh access token", async () => {
+      // First login to get refresh token
+      const loginResponse = await makeRequest("/rpc/auth/login", {
+        email: "test@example.com",
+        password: "Password123!",
+      });
+      const loginData = await loginResponse.json();
+
+      // Wait a bit to ensure different timestamps
+      await new Promise(resolve => setTimeout(resolve, 100));
+
+      // Use refresh token to get new access token
+      const refreshResponse = await makeRequest("/rpc/auth/refresh", {
+        refresh_token: loginData.refresh_token,
+      });
+
+      expect(refreshResponse.status).toBe(200);
+      const refreshData = await refreshResponse.json();
+      expect(refreshData.access_token).toBeDefined();
+      expect(refreshData.refresh_token).toBeDefined();
+      expect(refreshData.expires_in).toBe(3600);
+      expect(refreshData.token_type).toBe("Bearer");
+      
+      // New refresh token should be different from original (contains random payload)
+      expect(refreshData.refresh_token).not.toBe(loginData.refresh_token);
+      // Access token might be same if generated in same second, but should be valid
+      expect(refreshData.access_token).toBeDefined();
+      expect(refreshData.access_token.length).toBeGreaterThan(0);
+    });
+
+    test("should reject invalid refresh token", async () => {
+      const response = await makeRequest("/rpc/auth/refresh", {
+        refresh_token: "invalid-token",
+      });
+
+      expect(response.status).toBe(401);
+      const data = await response.json();
+      expect(data.error).toBe("invalid_refresh_token");
+    });
+
+    test("should logout and invalidate refresh token", async () => {
+      // First login to get refresh token
+      const loginResponse = await makeRequest("/rpc/auth/login", {
+        email: "test@example.com",
+        password: "Password123!",
+      });
+      const loginData = await loginResponse.json();
+
+      // Logout
+      const logoutResponse = await makeRequest("/rpc/auth/logout", {
+        refresh_token: loginData.refresh_token,
+      });
+
+      expect(logoutResponse.status).toBe(200);
+      const logoutData = await logoutResponse.json();
+      expect(logoutData.message).toBe("Successfully logged out");
+
+      // Try to use the refresh token again - should fail
+      const refreshResponse = await makeRequest("/rpc/auth/refresh", {
+        refresh_token: loginData.refresh_token,
+      });
+
+      expect(refreshResponse.status).toBe(401);
+      const refreshData = await refreshResponse.json();
+      expect(refreshData.error).toBe("invalid_refresh_token");
+    });
+
+    test("should reject logout with invalid token", async () => {
+      const response = await makeRequest("/rpc/auth/logout", {
+        refresh_token: "invalid-token",
+      });
+
+      expect(response.status).toBe(401);
+      const data = await response.json();
+      expect(data.error).toBe("invalid_refresh_token");
     });
   });
 
@@ -198,7 +284,7 @@ describe("Putting Test Suite API", () => {
         password: "Password123!",
       });
       const loginData = await loginResponse.json();
-      authToken = loginData.token;
+      authToken = loginData.access_token;
     });
 
     test("should create a new round", async () => {
@@ -278,7 +364,7 @@ describe("Putting Test Suite API", () => {
         password: "Password123!",
       });
       const loginData = await loginResponse.json();
-      authToken = loginData.token;
+      authToken = loginData.access_token;
     });
 
     test("should get user profile with stats", async () => {

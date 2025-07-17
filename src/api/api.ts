@@ -5,7 +5,7 @@ import { authMiddleware } from "./hono-middlewares";
 import { type AppContext } from "./types";
 
 // Import your Zod schemas
-import { LoginUserSchema, RegisterUserSchema } from "./schemas/auth";
+import { LoginUserSchema, RegisterUserSchema, RefreshTokenSchema } from "./schemas/auth";
 import {
   CreateRoundSchema,
   GetRoundSchema,
@@ -38,6 +38,18 @@ export function createApiRoutes(services: Services) {
   app.post("/auth/login", zValidator("json", LoginUserSchema), async (c) => {
     const input = c.req.valid("json");
     const result = await services.auth.login(input);
+    return c.json(result);
+  });
+
+  app.post("/auth/refresh", zValidator("json", RefreshTokenSchema), async (c) => {
+    const input = c.req.valid("json");
+    const result = await services.auth.refreshToken(input);
+    return c.json(result);
+  });
+
+  app.post("/auth/logout", zValidator("json", RefreshTokenSchema), async (c) => {
+    const input = c.req.valid("json");
+    const result = await services.auth.logout(input);
     return c.json(result);
   });
 
