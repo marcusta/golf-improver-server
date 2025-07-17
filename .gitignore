@@ -41,5 +41,4 @@ pnpm-debug.log*
 bun.lockb
 
 *.db
-*.sql
 *.sqlite
